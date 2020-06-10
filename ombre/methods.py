@@ -86,6 +86,7 @@ def average_spectrum(obs):
     else:
         avg = np.atleast_3d(np.atleast_3d(np.average(obs.data, weights=1/obs.error, axis=2)).transpose([0, 2, 1]))
     spec_mean = np.average(obs.data/avg, weights=avg/obs.error, axis=(0, 1))
+    spec_mean /= np.mean(spec_mean)
     return (np.atleast_3d(spec_mean) * np.ones(obs.shape).transpose([0, 2, 1])).transpose([0, 2, 1])
 
 
@@ -94,8 +95,8 @@ def get_flatfield(obs, model):
     g141_flatfile = CALIPATH+'WFC3.IR.G141.flat.2.fits'
     ff_hdu = fits.open(g141_flatfile)
 
-    a1, a2 = np.where(obs.spatial[0, :, 0])[0][0] , np.where(obs.spatial[0, :, 0])[0][-1] + 1
-    b1, b2 = np.where(obs.spectral[0, 0, :])[0][0] , np.where(obs.spectral[0, 0, :])[0][-1] + 1
+    #a1, a2 = np.where(obs.spatial[0, :, 0])[0][0] , np.where(obs.spatial[0, :, 0])[0][-1] + 1
+    #b1, b2 = np.where(obs.spectral[0, 0, :])[0][0] , np.where(obs.spectral[0, 0, :])[0][-1] + 1
 
     # Some handy shapes
     nt, nrow, ncol = obs.shape
@@ -108,7 +109,7 @@ def get_flatfield(obs, model):
     f = f[:, 1014//2 - obs.ns//2 : 1014//2 + obs.ns//2, 1014//2 - obs.ns//2 : 1014//2 + obs.ns//2]
 
     f = np.vstack([f, np.ones((1, f.shape[1], f.shape[2]))])
-    X = f[:, a1:a2, :][:, :, b1:b2][:, np.ones((nrow, ncol), bool)].T
+    X = f[:, obs.spatial.reshape(-1)][:, :, obs.spectral.reshape(-1)][:, np.ones((nrow, ncol), bool)].T
 
     avg = np.nanmean((obs.data/norm/model), axis=0)[np.ones((nrow, ncol), bool)]
     avg_err = ((1/nt)*np.nansum(((obs.error/norm/model))**2, axis=0)**0.5)[np.ones((nrow, ncol), bool)]
@@ -181,13 +182,23 @@ def build_vsr(obs, errors=False):
     frames = obs.data / (obs.model)
     frames_err = obs.error  / (obs.model)
 
+
+
+    ff = np.average((frames.T/obs.average_lc).T, weights=(obs.average_lc/frames_err.T).T, axis=0)
+    ff = np.atleast_3d(ff).transpose([2, 0, 1]) * np.ones(obs.data.shape)
+
+    frames /= ff
+    frames_err /= ff
+
+
     knots = np.linspace(-0.5, 0.5, int(obs.shape[1]))
     spline = lk.designmatrix.create_sparse_spline_matrix(obs.Y[0].ravel(), knots=knots)
     A = sparse.hstack([sparse.csr_matrix(np.ones(np.product(obs.shape[1:]))).T,
-                        sparse.csr_matrix(obs.X[0].ravel()).T,
-                        spline.X,
+#                        sparse.csr_matrix(obs.X[0].ravel()).T,
+#                        spline.X,
                         spline.X.T.multiply(obs.X[0].ravel()).T,
-                        spline.X.T.multiply(obs.X[0].ravel()**2).T], format='csr')
+                        #spline.X.T.multiply(obs.X[0].ravel()**2).T,
+                        ], format='csr')
 
 
     dm = lk.designmatrix.SparseDesignMatrix(A)
@@ -200,14 +211,14 @@ def build_vsr(obs, errors=False):
     prior_mu[0] = 1
     prior_sigma[1] = 0.05
 
+    mask = (obs.spec_mean[0] > 0.7).ravel()
     for idx in tqdm(range(obs.shape[0]), desc='Building Detailed VSR'):
         y = frames[idx].ravel()
         ye = frames_err[idx].ravel()
-
         # Linear algebra to find the best fitting shifts
-        sigma_w_inv = A.T.dot(A/ye[:, None]**2)
+        sigma_w_inv = A[mask].T.dot(A[mask]/ye[mask, None]**2)
         sigma_w_inv += np.diag(1. / prior_sigma**2)
-        B = A.T.dot((y/ye**2))
+        B = A[mask].T.dot((y[mask]/ye[mask]**2))
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         ws.append(w)
@@ -216,13 +227,14 @@ def build_vsr(obs, errors=False):
         if errors:
             e = (A.dot(np.linalg.solve(sigma_w_inv, A.toarray().T)).diagonal()**0.5).reshape(frames[0].shape)
             vsr_grad_model_errs[idx] = e/e.mean()
+#        import pdb;pdb.set_trace()
     if errors:
         return vsr_grad_model, vsr_grad_model_errs
     return vsr_grad_model
 
 
 
-def build_spectrum(obs, errors=False):
+def build_spectrum(obs, errors=False, npoly=2):
 
     def _make_A(obs):
         diags = np.diag(np.ones(obs.shape[1]))
@@ -238,18 +250,35 @@ def build_spectrum(obs, errors=False):
         y, t = sparse.csr_matrix(obs.Y[:, :, 0].ravel() - obs.Y.min()).T, sparse.csr_matrix(obs.T[:, :, 0].ravel() - obs.T.min()).T
 
         ones = sparse.csr_matrix(np.ones(y.shape[0])).T
-        wlc = sparse.csr_matrix((np.atleast_2d(obs.average_lc).T * np.ones(obs.shape[:2])).ravel()).T
+        wlc = sparse.csr_matrix((np.atleast_2d(obs.average_lc - 1).T * np.ones(obs.shape[:2])).ravel()).T
+        delta_depth = sparse.csr_matrix((np.atleast_2d((obs.average_lc - 1) * (obs.model_lc != 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
 
-        At = sparse.hstack([ones, wlc, t, t.multiply(t), t.multiply(t).multiply(t)])
-        At2 = sparse.hstack([ones, t2, t2.multiply(t2), t2.multiply(t2).multiply(t2)])
-        Ay = sparse.hstack([ones, y, y.multiply(y), y.multiply(y).multiply(y)])
+
+        def poly(x, npoly=2):
+            mul = lambda x: x.multiply(x)
+            r = sparse.csr_matrix(np.ones(x.shape[0])).T
+            r = sparse.hstack([r, x], format='csr')
+            for i in range(npoly - 2):
+                r = sparse.hstack([r, mul(r[:, -1])], format='csr')
+            return r
+
+        At = poly(t, npoly)
+        At2 = poly(t2, npoly)
+        Ay = poly(y, npoly)
+#        At = sparse.hstack([ones, t, t.multiply(t), t.multiply(t).multiply(t)])
+#        At2 = sparse.hstack([ones, t2, t2.multiply(t2), t2.multiply(t2).multiply(t2)])
+#        Ay = sparse.hstack([ones, y, y.multiply(y), y.multiply(y).multiply(y)])
+
 
         A = sparse.hstack([(At.T.multiply(A)).T for A in Ay.T])
         A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T])
-        A = sparse.hstack([A, A1])
+
+
+        A = sparse.hstack([wlc, delta_depth, A, A1])
 
         prior_mu = np.zeros(A.shape[1])
         prior_sigma = np.ones(A.shape[1]) * 0.5
+        prior_mu[0] = 1
 
         A = sparse.hstack([A, rows], format='csr')
 
@@ -260,6 +289,8 @@ def build_spectrum(obs, errors=False):
 
     frames = obs.data / (obs.model)
     frames_err = obs.error  / (obs.model)
+    frames_err /= np.median(frames)
+    frames /= np.median(frames)
 
     A, prior_mu, prior_sigma = _make_A(obs)
 
@@ -274,21 +305,28 @@ def build_spectrum(obs, errors=False):
 
         y = (frame).ravel()
         ye = (frame_err).ravel()
+        mask = (obs.vsr_mean[:, :, idx] > 0.93).ravel()
 
         # Linear algebra to find the best fitting shifts
-        sigma_w_inv = A.T.dot(A/ye[:, None]**2)
+        sigma_w_inv = A[mask].T.dot(A[mask]/ye[mask, None]**2)
         sigma_w_inv += np.diag(1. / prior_sigma**2)
-        B = A.T.dot(y/ye**2)
+        B = A[mask].T.dot(y[mask]/ye[mask]**2)
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         ws.append(w)
-        y_model[:, :, idx] = A.dot(w).reshape(frame.shape)
+        m = A.dot(w).reshape(frame.shape)
+        y_model[:, :, idx] = A[:, 2:].dot(w[2:]).reshape(frame.shape)
+        y_model[:, :, idx] -= y_model[:, :, idx].mean()
+        y_model[:, :, idx] += m.mean()
+
+        #import pdb;pdb.set_trace()
+
         if errors:
             y_model_errs[:, :, idx] = (A.dot(np.linalg.solve(sigma_w_inv, A.toarray().T)).diagonal()**0.5).reshape(frame.shape)
 
     if errors:
-        y_model_errs = (y_model_errs.T / np.mean(y_model, axis=(1, 2))).T
-        y_model = (y_model.T / np.mean(y_model, axis=(1, 2))).T
+#        y_model_errs = (y_model_errs.T / np.mean(y_model, axis=(1, 2))).T
+#        y_model = (y_model.T / np.mean(y_model, axis=(1, 2))).T
         return y_model, y_model_errs, np.asarray(ws)
-    y_model = (y_model.T / np.mean(y_model, axis=(1, 2))).T
+#    y_model = (y_model.T / np.mean(y_model, axis=(1, 2))).T
     return y_model, np.asarray(ws)

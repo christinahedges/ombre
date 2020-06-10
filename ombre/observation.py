@@ -17,11 +17,13 @@ from astroquery.mast import Observations as astropyObs
 
 from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum
 
+from starry.extensions import from_nexsci
+
 log = logging.getLogger('ombre')
 
 class Observation(object):
 
-    def __init__(self, filenames, propid=None, visit=None, teff=6000):
+    def __init__(self, filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
         """HST Observation.
 
         Parameters
@@ -30,7 +32,10 @@ class Observation(object):
             List of filenames of HST WFC3 observations, or path to a directory.
         """
         if isinstance(filenames, str):
-            self.filenames = np.asarray(glob(filenames))
+            if not filenames.endswith('*'):
+                self.filenames = np.asarray(glob(filenames + "*"))
+            else:
+                self.filenames = np.asarray(glob(filenames))
         else:
             self.filenames = np.asarray(filenames)
         if len(self.filenames) == 0:
@@ -38,12 +43,24 @@ class Observation(object):
         if not np.all([fname.endswith('_flt.fits') for fname in self.filenames]):
             raise ValueError('`filenames` must all be `_flt.fits` files. e.g. {}'.format(self.filenames[0]))
 
+        self.teff = teff
         self.hdrs = np.asarray([fits.getheader(file) for idx, file in enumerate(self.filenames)])
 
-        self.name = np.asarray([hdr['TARGNAME'] for hdr in self.hdrs])
+        if name is None:
+            self.name = np.asarray([hdr['TARGNAME'] for hdr in self.hdrs])
+        else:
+            self.name = name
         if not len(np.unique(self.name)) == 1:
             raise ValueError('Multiple targets in `filenames`.')
         self.name = np.unique(self.name)[0]
+
+        try:
+            self.sys = from_nexsci(self.name, limb_darkening=[0, 0])
+        except ValueError:
+            raise ValueError('{} is not a recognized exoplanet name. Please pass a correct `name`.'.format(self.name))
+        if t0 is not None:
+            self.sys.secondaries[0].t0 = t0
+
 
         self.filters = np.asarray([hdr['FILTER'] for hdr in self.hdrs])
         mask = (self.filters == 'G141') | (self.filters == 'G102')
@@ -56,8 +73,7 @@ class Observation(object):
         self.propid = np.asarray([hdr['PROPOSID'] for hdr in self.hdrs])
         if propid is None:
             if len(np.unique(self.propid)) != 1:
-                warnings.warn('Data sets from multiple proposals have been passed ({})',
-                                ''.format(np.unique(self.propid)))
+                warnings.warn('Data sets from multiple proposals have been passed ({})'.format(np.unique(self.propid)))
         else:
             mask &= self.propid == propid
 
@@ -71,22 +87,25 @@ class Observation(object):
 
         self.time, self.start_date = np.asarray([convert_time(hdr) for hdr in self.hdrs]).T
         s = np.argsort(self.time)
-        [setattr(self, key, getattr(self, key)[s]) for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'hdrs', 'filenames']]
+        [setattr(self, key, getattr(self, key)[s])
+                for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'hdrs', 'filenames']]
         mask = mask[s]
 
-        self.nvisits = len(np.unique(self.start_date))
-        self.visits = np.unique(self.start_date, return_inverse=True)[1] + 1
+        self.nvisits = len(np.unique(np.round(self.start_date, -1)))
+        self.visits = np.unique(np.round(self.start_date, -1), return_inverse=True)[1] + 1
 
         if visit != None:
             if visit > self.nvisits:
                 raise ValueError('Only {} visits available.'.format(self.nvisits))
             mask &= self.visits == visit
-        self.time, self.start_date, self.visits = self.time[mask], self.start_date[mask], self.visits[mask]
+        self.time, self.start_date, self.visits, self.propid, self.exptime, self.filters =\
+            self.time[mask], self.start_date[mask], self.visits[mask], self.propid[mask],\
+            self.exptime[mask], self.filters[mask]
         self.postarg1 = np.asarray([hdr['POSTARG1'] for hdr in self.hdrs])[mask]
         self.postarg2 = np.asarray([hdr['POSTARG2'] for hdr in self.hdrs])[mask]
         self.sun_alt = np.asarray([hdr['SUN_ALT'] for hdr in self.hdrs])[mask]
+        self.hdrs = self.hdrs[mask]
 
-        self.filters = self.filters[mask]
         self.ra = self.hdrs[0]['RA_TARG']
         self.dec = self.hdrs[0]['DEC_TARG']
         self.nt = np.sum(mask)
@@ -99,8 +118,32 @@ class Observation(object):
         self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)])
 
         self._load_data()
+        self._build_masks()
+        self._build_data()
+        self.sensitivity, self.wavelength = calibrate(self, self.teff)
+
+
+    def _load_data(self):
+        """ Helper function to load in the data """
+        self.sci, self.err, self.dq = np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns), dtype=int)
+        self.velocity_aberration = np.zeros(self.nt)
+        for jdx, file in enumerate(self._filenames):
+            hdulist = fits.open(file)
+            self.sci[jdx], self.err[jdx], self.dq[jdx] = np.asarray([hdu.data for hdu in hdulist[1:4]])
+            if hdulist[1].header['BUNIT'] == 'ELECTRONS':
+                self.sci[jdx] /= hdulist[1].header['SAMPTIME']
+                self.err[jdx] /= hdulist[1].header['SAMPTIME']
+            self.velocity_aberration[jdx] = hdulist[1].header['VAFACTOR']
+            hdulist.close('all')
+        qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
+        self.err[(self.dq & qmask) != 0] = 1e10
+
+
+    def _build_masks(self):
         self.mask, self.spectral, self.spatial = simple_mask(self)
 
+
+    def _build_data(self):
         self.flat = np.ones((1, *self.sci.shape[1:]))
         for count in [0, 1]:
             # We do this twice to improve the averages and flat field estimate
@@ -121,7 +164,6 @@ class Observation(object):
         res = ((res.T) - np.mean(res, axis=(1, 2))).T
         self.cosmic_rays = sigma_clip(res, sigma=8, axis=0).mask
         self.error += self.cosmic_rays * 1e10
-        self.sensitivity, self.wavelength = calibrate(self, teff)
 
 
         T = (np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])).transpose([1, 0, 2])
@@ -153,24 +195,12 @@ class Observation(object):
                             'hdrs', 'postarg1', 'postarg2', 'visits',
                             'sun_alt', 'velocity_aberration', '_filenames', 'sci',
                              'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
-                              'model', 'cosmic_rays', 'X', 'Y', 'T'] if hasattr(copyself, key)]
-        copyself.nt = len(self.time)
+                              'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward'] if hasattr(copyself, key)]
+        copyself.nt = len(copyself.time)
+        copyself._build_masks()
+        copyself._build_data()
+        copyself.sensitivity, copyself.wavelength = calibrate(copyself, self.teff)
         return copyself
-
-    def _load_data(self):
-        """ Helper function to load in the data """
-        self.sci, self.err, self.dq = np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns), dtype=int)
-        self.velocity_aberration = np.zeros(self.nt)
-        for jdx, file in enumerate(self._filenames):
-            hdulist = fits.open(file)
-            self.sci[jdx], self.err[jdx], self.dq[jdx] = np.asarray([hdu.data for hdu in hdulist[1:4]])
-            if hdulist[1].header['BUNIT'] == 'ELECTRONS':
-                self.sci[jdx] /= hdulist[1].header['SAMPTIME']
-                self.err[jdx] /= hdulist[1].header['SAMPTIME']
-            self.velocity_aberration[jdx] = hdulist[1].header['VAFACTOR']
-            hdulist.close('all')
-        qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
-        self.err[(self.dq & qmask) != 0] = 1e10
 
 
 
@@ -232,17 +262,20 @@ class Observation(object):
                 raise ValueError("Can not parse direction {}. "
                                     "Choose from `'forward'` or `'backward'`".format(direction))
 
-        if not np.asarray([fits.open(fname)[0].header['FILTER'] == 'G141' for fname in paths]).any():
-            raise ValueError('No G141 files available. Try changing `visit` and `direction` keywords.')
         return Observation(paths, **kwargs)
 
     def __repr__(self):
         return '{} (WFC3 Observation)'.format(self.name)
 
+    @property
+    def model_lc(self):
+        return self.sys.flux(self.time).eval()
 
     @property
     def average_lc(self):
-        return np.average(self.data/self.model, weights=self.model/self.error, axis=(1, 2))
+        lc = np.average(self.data/self.model, weights=self.model/self.error, axis=(1, 2))
+        norm = np.median(lc[self.model_lc == 1])
+        return lc/norm
 
     @property
     def average_lc_errors(self):
@@ -251,21 +284,25 @@ class Observation(object):
 
     @property
     def channel_lcs(self):
-        return np.average(self.data/self.model, weights=self.model/self.error, axis=(1))
+        m = ((self.vsr_mean > 0.93)).astype(float)
+        return np.average((self.data/self.model) * m, weights=(self.model/self.error) * m, axis=(1))
 
     @property
     def channel_lcs_errors(self):
+        m = ((self.vsr_mean > 0.93)).astype(float)
         draws = np.random.normal(self.data/self.model, self.error/self.model, size=(50, *self.shape))
-        return np.asarray([np.average(d, weights=np.nan_to_num(self.model/self.error), axis=(1)) for d in draws]).std(axis=0)
+        return np.asarray([np.average(d * m, weights=np.nan_to_num(self.model/self.error) * m, axis=(1)) for d in draws]).std(axis=0)
 
     @property
     def raw_average_lc(self):
-        return np.average(self.data/self.spec_mean, weights=self.spec_mean/self.error, axis=(1, 2))
+        m = ((self.vsr_mean > 0.93)).astype(float)
+        return np.average((self.data/self.spec_mean) * m, weights=(self.spec_mean/self.error) * m, axis=(1, 2))
 
     @property
     def raw_average_lc_errors(self):
+        m = ((self.vsr_mean > 0.93)).astype(float)
         draws = np.random.normal(self.data/self.spec_mean, self.error/self.spec_mean, size=(50, *self.shape))
-        return np.asarray([np.average(d, weights=np.nan_to_num(self.spec_mean/self.error), axis=(1, 2)) for d in draws]).std(axis=0)
+        return np.asarray([np.average(d * m, weights=np.nan_to_num(self.spec_mean/self.error) * m, axis=(1, 2)) for d in draws]).std(axis=0)
 
     @property
     def raw_channel_lcs(self):
@@ -302,6 +339,8 @@ class Observation(object):
             ax.scatter(self.time, rlc, c='r', marker='.', label='Raw Light Curve')
             ax.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
         ax.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
+        t = np.linspace(self.time[0], self.time[-1], 1000)
+        ax.plot(t, self.sys.flux(t).eval(), c='b', label='model')
         ax.legend()
         return ax
 
@@ -331,6 +370,45 @@ class Observation(object):
         plt.subplots_adjust(wspace=0.02)
         return fig
 
+    def plot_channel_lcs(self, offset=10, lines=True, residuals=False, **kwargs):
+        c = np.nanmedian(self.channel_lcs) *  np.ones(self.nt)
+        cmap = kwargs.pop('cmap', plt.get_cmap('coolwarm'))
+        fig, ax = plt.subplots(1, 2, figsize=(15, 25), sharey=True)
+
+        if residuals:
+            [ax[0].scatter(self.time, self.raw_channel_lcs[:, kdx] + kdx * offset - self.wl,
+                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+                        vmin=self.wavelength[0], vmax=self.wavelength[-1],
+                        cmap=cmap)
+                            for kdx in range(len(self.wavelength))];
+
+            [ax[1].scatter(self.time, self.channel_lcs[:, kdx] + kdx * offset - self.wl,
+                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+                         vmin=self.wavelength[0], vmax=self.wavelength[-1],
+                         cmap=cmap)
+                            for kdx in range(len(self.wavelength))];
+            if lines:
+                [ax[1].plot(self.time, np.ones(self.nt) * kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(self.channel_lcs[:, kdx]) != 0)];
+
+        else:
+            [ax[0].scatter(self.time, self.raw_channel_lcs[:, kdx] + kdx * offset,
+                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+                        vmin=self.wavelength[0], vmax=self.wavelength[-1],
+                        cmap=cmap)
+                            for kdx in range(len(self.wavelength))];
+
+            [ax[1].scatter(self.time, self.channel_lcs[:, kdx] + kdx * offset,
+                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+                         vmin=self.wavelength[0], vmax=self.wavelength[-1],
+                         cmap=cmap)
+                            for kdx in range(len(self.wavelength))];
+            if lines:
+                [ax[1].plot(self.time, c + kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(self.channel_lcs[:, kdx]) != 0)];
+        ax[1].set(xlabel='Time', ylabel='Flux', title='Corrected', yticklabels='')
+        ax[0].set(xlabel='Time', ylabel='Flux', title='Raw', yticklabels='')
+        plt.subplots_adjust(wspace=0.)
+        return fig
+
     def correct_VSR(self, errors=False):
         if hasattr(self, '_vsr_grad_model'):
             warnings.warn('You have already run `correct_VSR`. No correction will be applied')
@@ -339,19 +417,25 @@ class Observation(object):
             self._vsr_grad_model, self._vsr_grad_model_errs = build_vsr(self)
             self.model_err = np.hypot(self.model_err, self._vsr_grad_model_errs) * self.model/self._vsr_grad_model
             self.model *= self._vsr_grad_model
+            self.model_err = (self.model_err.T/np.mean(self.model, axis=(1, 2))).T
+            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
         else:
             self._vsr_grad_model = build_vsr(self)
             self.model *= self._vsr_grad_model
+            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
 
 
-    def correct_spectrum_tilts(self, errors=False):
+    def correct_spectrum_tilts(self, errors=False, npoly=2):
         if hasattr(self, '_spec_grad_model'):
             warnings.warn('You have already run `correct_spectrum_tilts`. No correction will be applied')
             return
         if errors:
-            self._spec_grad_model, self._spec_grad_model_errs, self._spec_ws = build_vsr(self)
+            self._spec_grad_model, self._spec_grad_model_errs, self._spec_ws = build_spectrum(self, errors=errors, npoly=npoly)
             self.model_err = np.hypot(self.model_err, self._spec_grad_model_errs) * self.model/self._spec_grad_model
             self.model *= self._spec_grad_model
+            self.model_err = (self.model_err.T/np.mean(self.model, axis=(1, 2))).T
+            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
         else:
-            self._spec_grad_model, self._spec_ws = build_spectrum(self)
+            self._spec_grad_model, self._spec_ws = build_spectrum(self, npoly=npoly)
             self.model *= self._spec_grad_model
+            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
