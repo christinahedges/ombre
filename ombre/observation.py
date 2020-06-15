@@ -12,10 +12,12 @@ import logging
 
 from astropy.io import fits
 from astropy.time import Time
-from astropy.stats import sigma_clip
+from astropy.stats import sigma_clip, sigma_clipped_stats
+from astropy.convolution import convolve, Box2DKernel
+
 from astroquery.mast import Observations as astropyObs
 
-from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum
+from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum, fit_data
 
 from starry.extensions import from_nexsci
 
@@ -23,7 +25,18 @@ log = logging.getLogger('ombre')
 
 class Observation(object):
 
-    def __init__(self, filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
+    def __init__(self, name):
+        self.name = name
+        [setattr(self, key, None)
+                for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
+                            'hdrs', 'postarg1', 'postarg2', 'visits',
+                            'sun_alt', 'velocity_aberration', '_filenames', 'sci',
+                            'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
+                             'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward', 'orbits',
+                             'ra', 'dec', 'nt', 'ns', 'sys', 'teff']]
+
+    @staticmethod
+    def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
         """HST Observation.
 
         Parameters
@@ -31,6 +44,7 @@ class Observation(object):
         filenames : list of str, or str
             List of filenames of HST WFC3 observations, or path to a directory.
         """
+        self = Observation(None)
         if isinstance(filenames, str):
             if not filenames.endswith('*'):
                 self.filenames = np.asarray(glob(filenames + "*"))
@@ -114,14 +128,12 @@ class Observation(object):
         self._filenames = np.asarray(self.filenames)[mask]
         self.forward = self.postarg2 > 0
 
-        orbits = np.where(np.append(0, np.diff(self.time)) > 0.015)[0]
-        self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)])
 
         self._load_data()
         self._build_masks()
         self._build_data()
         self.sensitivity, self.wavelength = calibrate(self, self.teff)
-
+        return self
 
     def _load_data(self):
         """ Helper function to load in the data """
@@ -176,7 +188,37 @@ class Observation(object):
 
         self.X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(self.data.shape)
         self.Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.data.shape)
-        self.xshift = np.average(self.X, weights=self.data/self.error, axis=(1, 2))
+
+
+        w = np.ones(self.sci.shape)
+        w[self.err/self.sci > 0.1] = 1e10
+
+        larger_mask = convolve(self.mask[0], Box2DKernel(11)) > 1e-5
+        Y, X = np.mgrid[:self.sci.shape[1], :self.sci.shape[2]]
+        X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(self.sci.shape)
+        Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.sci.shape)
+        w1 = (self.sci/w)[:, larger_mask]
+        w1 = (w1.T/w1.mean(axis=1)).T
+        xshift = np.mean(X[:, larger_mask] * w1, axis=1)
+        self.xshift = xshift - np.median(xshift)
+        yshift = np.mean(Y[:, larger_mask] * w1, axis=1)
+        self.yshift = yshift - np.median(yshift)
+
+#        self.xshift = np.average(self.X, weights=self.data/self.error, axis=(1, 2))
+#        self.yshift = np.average(self.Y, weights=self.data/self.error, axis=(1, 2))
+
+
+#        edge = (self.vsr_mean < np.nanpercentile(self.vsr_mean, 10))
+#        r = np.copy(self.residuals)
+#        r[edge] = np.nan
+#        chi = np.nansum((r**2)/self.error**2, axis=2)/self.nwav
+#        chi /= np.nanmean(chi, axis=0)
+#        self._bad_rows = (np.atleast_3d(sigma_clip(chi, sigma=8).mask)) * np.ones(self.shape, bool)
+
+
+        orbits = np.where(np.append(0, np.diff(self.time)) > 0.015)[0]
+        self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)]).T
+
 
     def __len__(self):
         return self.nt
@@ -189,13 +231,16 @@ class Observation(object):
         return deepcopy(self)
 
     def __getitem__(self, s):
-        copyself = self.copy()
+        copyself = Observation(self.name)
         [setattr(copyself, key, getattr(self, key)[s])
                 for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
                             'hdrs', 'postarg1', 'postarg2', 'visits',
                             'sun_alt', 'velocity_aberration', '_filenames', 'sci',
-                             'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
-                              'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward'] if hasattr(copyself, key)]
+                            'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
+                             'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward'] if hasattr(copyself, key)]
+        [setattr(copyself, key, getattr(self, key))
+                for key in ['ra', 'dec', 'nt', 'ns', 'sys', 'teff']]
+#        import pdb;pdb.set_trace()
         copyself.nt = len(copyself.time)
         copyself._build_masks()
         copyself._build_data()
@@ -262,7 +307,7 @@ class Observation(object):
                 raise ValueError("Can not parse direction {}. "
                                     "Choose from `'forward'` or `'backward'`".format(direction))
 
-        return Observation(paths, **kwargs)
+        return Observation.from_file(paths, **kwargs)
 
     def __repr__(self):
         return '{} (WFC3 Observation)'.format(self.name)
@@ -273,54 +318,60 @@ class Observation(object):
 
     @property
     def average_lc(self):
-        lc = np.average(self.data/self.model, weights=self.model/self.error, axis=(1, 2))
+        lc = np.average((self.data/self.model), weights=(self.model/self.error), axis=(1, 2))
         norm = np.median(lc[self.model_lc == 1])
         return lc/norm
 
-    @property
-    def average_lc_errors(self):
-        draws = np.random.normal(self.data/self.model, self.error/self.model, size=(50, *self.shape))
-        return np.asarray([np.average(d, weights=np.nan_to_num(self.model/self.error), axis=(1, 2)) for d in draws]).std(axis=0)
+    # @property
+    # def average_lc_errors(self):
+    #     m = np.atleast_3d(self.vsr_mean.mean(axis=0) > 0.93).transpose([2, 0, 1]) * np.ones(self.shape)
+    #     draws = np.random.normal(self.data/self.model, self.error/self.model, size=(50, *self.shape))
+    #     return np.asarray([np.average(d * m, weights=np.nan_to_num(self.model/self.error) * m, axis=(1, 2)) for d in draws]).std(axis=0)
 
     @property
     def channel_lcs(self):
-        m = ((self.vsr_mean > 0.93)).astype(float)
-        return np.average((self.data/self.model) * m, weights=(self.model/self.error) * m, axis=(1))
+        return np.average((self.data/self.model), weights=(self.model/self.error), axis=(1))
 
-    @property
-    def channel_lcs_errors(self):
-        m = ((self.vsr_mean > 0.93)).astype(float)
-        draws = np.random.normal(self.data/self.model, self.error/self.model, size=(50, *self.shape))
-        return np.asarray([np.average(d * m, weights=np.nan_to_num(self.model/self.error) * m, axis=(1)) for d in draws]).std(axis=0)
+    # @property
+    # def channel_lcs_errors(self):
+    #     m = np.atleast_3d(self.vsr_mean.mean(axis=0) > 0.93).transpose([2, 0, 1]) * np.ones(self.shape)
+    #     #m = (~self._bad_rows).astype(float)
+    #     draws = np.random.normal(self.data/self.model, self.error/self.model, size=(50, *self.shape))
+    #     return np.asarray([np.average(d * m, weights=np.nan_to_num(self.model/self.error) * m, axis=(1)) for d in draws]).std(axis=0)
 
     @property
     def raw_average_lc(self):
-        m = ((self.vsr_mean > 0.93)).astype(float)
-        return np.average((self.data/self.spec_mean) * m, weights=(self.spec_mean/self.error) * m, axis=(1, 2))
+        return np.average((self.data/self.spec_mean), weights=(self.spec_mean/self.error), axis=(1, 2))
 
-    @property
-    def raw_average_lc_errors(self):
-        m = ((self.vsr_mean > 0.93)).astype(float)
-        draws = np.random.normal(self.data/self.spec_mean, self.error/self.spec_mean, size=(50, *self.shape))
-        return np.asarray([np.average(d * m, weights=np.nan_to_num(self.spec_mean/self.error) * m, axis=(1, 2)) for d in draws]).std(axis=0)
+    # @property
+    # def raw_average_lc_errors(self):
+    #     m = np.atleast_3d(self.vsr_mean.mean(axis=0) > 0.93).transpose([2, 0, 1]) * np.ones(self.shape)
+    #     #m = (~self._bad_rows).astype(float)
+    #     draws = np.random.normal(self.data/self.spec_mean, self.error/self.spec_mean, size=(50, *self.shape))
+    #     return np.asarray([np.average(d * m, weights=np.nan_to_num(self.spec_mean/self.error) * m, axis=(1, 2)) for d in draws]).std(axis=0)
 
     @property
     def raw_channel_lcs(self):
-        return np.average(self.data/self.spec_mean, weights=self.spec_mean/self.error, axis=(1))
+        return np.average((self.data/self.spec_mean), weights=(self.spec_mean/self.error), axis=(1))
 
-    @property
-    def raw_channel_lcs_errors(self):
-        draws = np.random.normal(self.data/self.spec_mean, self.spec_mean/self.error, size=(50, *self.shape))
-        return np.asarray([np.average(d, weights=np.nan_to_num(self.model/self.error), axis=(1)) for d in draws]).std(axis=0)
+    # @property
+    # def raw_channel_lcs_errors(self):
+    #     m = np.atleast_3d(self.vsr_mean.mean(axis=0) > 0.93).transpose([2, 0, 1]) * np.ones(self.shape)
+    #     draws = np.random.normal(self.data/self.spec_mean, self.spec_mean/self.error, size=(50, *self.shape))
+    #     return np.asarray([np.average(d * m, weights=np.nan_to_num(self.model/self.error) * m, axis=(1)) for d in draws]).std(axis=0)
 
     @property
     def residuals(self):
         r = (self.data / self.model)
-        return (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
+        r = (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
+        return r
+
 
     def plot_average_lc(self, ax=None, errors=False):
         if ax is None:
-            _, ax = plt.subplots()
+            fig, ax1 = plt.subplots()
+        else:
+            ax1 = ax
 
         if errors:
             rlc, rlce = self.raw_average_lc, self.raw_average_lc_errors
@@ -329,20 +380,23 @@ class Observation(object):
             lc /= np.median(lc)
             rlce /= np.median(rlc)
             rlc /= np.median(rlc)
-            ax.errorbar(self.time, rlc, rlce, ls='', c='r', label='Raw Light Curve')
-            ax.errorbar(self.time, lc, lce, ls='', c='k', label='Corrected Light Curve')
+            ax1.errorbar(self.time, rlc, rlce, ls='', c='r', label='Raw Light Curve')
+            ax1.errorbar(self.time, lc, lce, ls='', c='k', label='Corrected Light Curve')
         else:
             rlc = self.raw_average_lc
             lc = self.average_lc
             lc /= np.median(lc)
             rlc /= np.median(rlc)
-            ax.scatter(self.time, rlc, c='r', marker='.', label='Raw Light Curve')
-            ax.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
-        ax.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
+            ax1.scatter(self.time, rlc, c='r', marker='.', label='Raw Light Curve')
+            ax1.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
+        ax1.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
         t = np.linspace(self.time[0], self.time[-1], 1000)
-        ax.plot(t, self.sys.flux(t).eval(), c='b', label='model')
-        ax.legend()
-        return ax
+        ax1.plot(t, self.sys.flux(t).eval(), c='b', label='model')
+        ax1.legend()
+        if ax is None:
+            return fig
+        else:
+            return ax1
 
     def plot_frame(self, frame=0):
         fig = plt.figure(figsize=(10, 10*self.shape[1]/self.shape[2]))
@@ -370,72 +424,137 @@ class Observation(object):
         plt.subplots_adjust(wspace=0.02)
         return fig
 
-    def plot_channel_lcs(self, offset=10, lines=True, residuals=False, **kwargs):
+
+    def plot_resids(self, vmin=0.999, vmax=1.001):
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot2grid((5, 1), (0, 0))
+
+        self.plot_average_lc(ax=ax)
+        ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='')
+
+        ax = plt.subplot2grid((5, 1), (1, 0), rowspan=4)
+
+
+        ts = self.channel_lcs
+        ts = (ts.T/np.mean(ts, axis=1))
+
+        dt = np.median(np.diff(self.time))
+        masks = [np.in1d(np.arange(self.nt), m)
+                    for m in np.array_split(np.arange(self.nt), np.where(np.append(0, np.diff(self.time)) > dt*1.5)[0])]
+        for m in masks:
+            plt.pcolormesh(self.time[m], self.wavelength, ts[:, m], vmin=vmin, vmax=vmax, cmap='PRGn')
+        cbar = plt.colorbar(orientation='horizontal')
+        cbar.set_label('$\delta$ Transit Depth')
+        ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='Time [BKJD]', ylabel='Wavelength [A]')
+        return fig
+
+
+    def plot_transmission_spectrum(self, offset=0.0005):
+        fig = plt.figure(figsize=(10, 10))
+        d = self.data/self.model
+        e = self.error/self.model
+
+        in_transit = (self.model_lc < self.model_lc.min() + (1 - self.model_lc.min()) * 0.2)
+        oot_transit = (self.model_lc == 1)
+
+        a = oot_transit & (self.time < self.time[in_transit].mean())
+        b = oot_transit & (self.time >= self.time[in_transit].mean())
+
+        ts = self.channel_lcs
+        ts = (ts.T/np.mean(ts, axis=1))
+
+
+        err = ts.T[~in_transit].std(axis=0).data
+        err /= (~in_transit).sum()**0.5
+
+        for idx, mask, col, label in zip([0, -1, 1], [in_transit, a, b], ['r', 'k', 'k'], ['In Transit', 'Before Transit', 'Out of Transit']):
+            y = np.average(d[mask], weights=1/e[mask], axis=(0, 1))
+            plt.errorbar(self.wavelength, 1 - y/np.median(y) + idx * offset, err, c=col)
+            if idx == 0:
+                transmission_spectrum = 1 - y/np.median(y)
+                transmission_spectrum_err = err
+
+        plt.xlabel('Wavelength [A]')
+        plt.ylabel('$\delta$')
+
+        return fig, transmission_spectrum, transmission_spectrum_err
+
+    def plot_channel_lcs(self, offset=0.01, lines=True, residuals=False, **kwargs):
         c = np.nanmedian(self.channel_lcs) *  np.ones(self.nt)
         cmap = kwargs.pop('cmap', plt.get_cmap('coolwarm'))
         fig, ax = plt.subplots(1, 2, figsize=(15, 25), sharey=True)
+        wl = self.average_lc.data
+        rc = self.raw_channel_lcs
+        rc /= np.median(rc)
+        cc = self.channel_lcs.data
+        cc /= np.median(cc)
 
         if residuals:
-            [ax[0].scatter(self.time, self.raw_channel_lcs[:, kdx] + kdx * offset - self.wl,
+            [ax[0].scatter(self.time, rc[:, kdx] + kdx * offset - wl,
                         c=np.ones(self.nt) * self.wavelength[kdx], s=1,
                         vmin=self.wavelength[0], vmax=self.wavelength[-1],
                         cmap=cmap)
                             for kdx in range(len(self.wavelength))];
 
-            [ax[1].scatter(self.time, self.channel_lcs[:, kdx] + kdx * offset - self.wl,
+            [ax[1].scatter(self.time, cc[:, kdx] + kdx * offset - wl,
                         c=np.ones(self.nt) * self.wavelength[kdx], s=1,
                          vmin=self.wavelength[0], vmax=self.wavelength[-1],
                          cmap=cmap)
                             for kdx in range(len(self.wavelength))];
             if lines:
-                [ax[1].plot(self.time, np.ones(self.nt) * kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(self.channel_lcs[:, kdx]) != 0)];
+                [ax[1].plot(self.time, np.ones(self.nt) * kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(cc[:, kdx]) != 0)];
 
         else:
-            [ax[0].scatter(self.time, self.raw_channel_lcs[:, kdx] + kdx * offset,
+            [ax[0].scatter(self.time, rc[:, kdx] + kdx * offset,
                         c=np.ones(self.nt) * self.wavelength[kdx], s=1,
                         vmin=self.wavelength[0], vmax=self.wavelength[-1],
                         cmap=cmap)
                             for kdx in range(len(self.wavelength))];
 
-            [ax[1].scatter(self.time, self.channel_lcs[:, kdx] + kdx * offset,
+            [ax[1].scatter(self.time, cc[:, kdx] + kdx * offset,
                         c=np.ones(self.nt) * self.wavelength[kdx], s=1,
                          vmin=self.wavelength[0], vmax=self.wavelength[-1],
                          cmap=cmap)
                             for kdx in range(len(self.wavelength))];
             if lines:
-                [ax[1].plot(self.time, c + kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(self.channel_lcs[:, kdx]) != 0)];
+                [ax[1].plot(self.time, c + kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(cc[:, kdx]) != 0)];
         ax[1].set(xlabel='Time', ylabel='Flux', title='Corrected', yticklabels='')
         ax[0].set(xlabel='Time', ylabel='Flux', title='Raw', yticklabels='')
         plt.subplots_adjust(wspace=0.)
         return fig
 
-    def correct_VSR(self, errors=False):
-        if hasattr(self, '_vsr_grad_model'):
-            warnings.warn('You have already run `correct_VSR`. No correction will be applied')
-            return
-        if errors:
-            self._vsr_grad_model, self._vsr_grad_model_errs = build_vsr(self)
-            self.model_err = np.hypot(self.model_err, self._vsr_grad_model_errs) * self.model/self._vsr_grad_model
-            self.model *= self._vsr_grad_model
-            self.model_err = (self.model_err.T/np.mean(self.model, axis=(1, 2))).T
-            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
-        else:
-            self._vsr_grad_model = build_vsr(self)
-            self.model *= self._vsr_grad_model
-            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
 
+    def correct(self):
+        self.model = fit_data(self)
 
-    def correct_spectrum_tilts(self, errors=False, npoly=2):
-        if hasattr(self, '_spec_grad_model'):
-            warnings.warn('You have already run `correct_spectrum_tilts`. No correction will be applied')
-            return
-        if errors:
-            self._spec_grad_model, self._spec_grad_model_errs, self._spec_ws = build_spectrum(self, errors=errors, npoly=npoly)
-            self.model_err = np.hypot(self.model_err, self._spec_grad_model_errs) * self.model/self._spec_grad_model
-            self.model *= self._spec_grad_model
-            self.model_err = (self.model_err.T/np.mean(self.model, axis=(1, 2))).T
-            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
-        else:
-            self._spec_grad_model, self._spec_ws = build_spectrum(self, npoly=npoly)
-            self.model *= self._spec_grad_model
-            self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
+#
+    # def correct_VSR(self, errors=False):
+    #     if hasattr(self, '_vsr_grad_model'):
+    #         warnings.warn('You have already run `correct_VSR`. No correction will be applied')
+    #         return
+    #     if errors:
+    #         self._vsr_grad_model, self._vsr_grad_model_errs = build_vsr(self)
+    #         self.model_err = np.hypot(self.model_err, self._vsr_grad_model_errs) * self.model/self._vsr_grad_model
+    #         self.model *= self._vsr_grad_model
+    #         self.model_err = (self.model_err.T/np.mean(self.model, axis=(1, 2))).T
+    #         self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
+    #     else:
+    #         self._vsr_grad_model = build_vsr(self)
+    #         self.model *= self._vsr_grad_model
+    #         self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
+    #
+    #
+    # def correct_spectrum_tilts(self, errors=False, npoly=2):
+    #     if hasattr(self, '_spec_grad_model'):
+    #         warnings.warn('You have already run `correct_spectrum_tilts`. No correction will be applied')
+    #         return
+    #     if errors:
+    #         self._spec_grad_model, self._spec_grad_model_errs, self._spec_ws = build_spectrum(self, errors=errors, npoly=npoly)
+    #         self.model_err = np.hypot(self.model_err, self._spec_grad_model_errs) * self.model/self._spec_grad_model
+    #         self.model *= self._spec_grad_model
+    #         self.model_err = (self.model_err.T/np.mean(self.model, axis=(1, 2))).T
+    #         self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
+    #     else:
+    #         self._spec_grad_model, self._spec_ws = build_spectrum(self, npoly=npoly)
+    #         self.model *= self._spec_grad_model
+    #         self.model = (self.model.T/np.mean(self.model, axis=(1, 2))).T
