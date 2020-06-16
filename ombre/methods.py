@@ -228,8 +228,8 @@ def _build_X(obs, frames, frames_err):
         At2 = poly(t2, npoly)
         Ay = poly(y, npoly)
 
-        A = sparse.hstack([(At.T.multiply(A)).T for A in Ay.T])
-        A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T])
+        A = sparse.hstack([(At.T.multiply(A)).T for A in Ay.T], format='csr')
+        A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T], format='csr')
 
         A = sparse.hstack([A, A1])
 
@@ -241,7 +241,17 @@ def _build_X(obs, frames, frames_err):
         X2[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
     prior_mu = np.hstack([prior_mu, np.zeros(X2.shape[1])])
     prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.5])
-    X = sparse.hstack([X1, X2], format='csr')
+
+    A = sparse.csr_matrix((np.atleast_2d((obs.model_lc != 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
+    X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
+    x = np.unique(obs.X)
+    for idx in tqdm(range(obs.nwav), desc='Building Spectrum Component'):
+        X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
+
+    prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
+    prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.01])
+
+    X = sparse.hstack([X1, X2, X3], format='csr')
 
 
     return X, prior_mu, prior_sigma
@@ -270,8 +280,12 @@ def fit_data(obs):
     B = X.T.dot((frames/frames_err**2).ravel())
     B += (prior_mu / prior_sigma**2)
     w = np.linalg.solve(sigma_w_inv, B)
-    model = X.dot(w).reshape(frames.shape)
+#    model1 = X.dot(w).reshape(frames.shape)
 
+#    import pdb;pdb.set_trace()
+    model = X[:, :-obs.nwav].dot(w[:-obs.nwav]).reshape(frames.shape)
+
+#    import pdb;pdb.set_trace()
 
     m = obs.spec_mean * obs.vsr_mean * model
 
@@ -412,13 +426,13 @@ def build_spectrum(obs, errors=False, npoly=2):
         A = sparse.hstack([wlc, delta_depth, A, A1])
 
         prior_mu = np.zeros(A.shape[1])
-        prior_sigma = np.ones(A.shape[1]) * 0.5
+        prior_sigma = np.ones(A.shape[1]) * 0.1
         prior_mu[0] = 1
 
         A = sparse.hstack([A, rows], format='csr')
 
         prior_mu = np.hstack([prior_mu, np.ones(rows.shape[1])])
-        prior_sigma = np.hstack([prior_sigma, np.ones(rows.shape[1]) * 1])
+        prior_sigma = np.hstack([prior_sigma, np.ones(rows.shape[1]) * 0.1])
 
         return A, prior_mu, prior_sigma
 
@@ -439,7 +453,7 @@ def build_spectrum(obs, errors=False, npoly=2):
         vsr_trend  = sparse.csr_matrix((obs._vsr_grad_model[:, :, idx].T * obs.xshift).T.ravel()).T
         A = sparse.hstack([A1, vsr_trend], format='csr')
         prior_mu = np.hstack([prior_mu1, 0])
-        prior_sigma = np.hstack([prior_sigma1, 0.5])
+        prior_sigma = np.hstack([prior_sigma1, 0.1])
 
         frame = frames[:, :, idx]
         frame_err = frames_err[:, :, idx]

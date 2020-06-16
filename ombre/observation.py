@@ -330,7 +330,9 @@ class Observation(object):
 
     @property
     def channel_lcs(self):
-        return np.average((self.data/self.model), weights=(self.model/self.error), axis=(1))
+        ts = np.average((self.data/self.model), weights=(self.model/self.error), axis=(1))
+        corr = np.median(ts[self.oot_transit], axis=(0))
+        return ts/corr
 
     # @property
     # def channel_lcs_errors(self):
@@ -366,6 +368,14 @@ class Observation(object):
         r = (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
         return r
 
+
+    @property
+    def in_transit(self):
+        return (self.model_lc < self.model_lc.min() + (1 - self.model_lc.min()) * 0.2)
+
+    @property
+    def oot_transit(self):
+        return (self.model_lc == 1) & (self.time > self.time[5])
 
     def plot_average_lc(self, ax=None, errors=False):
         if ax is None:
@@ -425,7 +435,7 @@ class Observation(object):
         return fig
 
 
-    def plot_resids(self, vmin=0.999, vmax=1.001):
+    def plot_resids(self):
         fig = plt.figure(figsize=(10, 10))
         ax = plt.subplot2grid((5, 1), (0, 0))
 
@@ -437,6 +447,8 @@ class Observation(object):
 
         ts = self.channel_lcs
         ts = (ts.T/np.mean(ts, axis=1))
+
+        vmin, vmax = np.percentile(ts, [5, 95])
 
         dt = np.median(np.diff(self.time))
         masks = [np.in1d(np.arange(self.nt), m)
@@ -451,24 +463,18 @@ class Observation(object):
 
     def plot_transmission_spectrum(self, offset=0.0005):
         fig = plt.figure(figsize=(10, 10))
-        d = self.data/self.model
-        e = self.error/self.model
 
-        in_transit = (self.model_lc < self.model_lc.min() + (1 - self.model_lc.min()) * 0.2)
-        oot_transit = (self.model_lc == 1)
-
-        a = oot_transit & (self.time < self.time[in_transit].mean())
-        b = oot_transit & (self.time >= self.time[in_transit].mean())
+        a = self.oot_transit & (self.time < self.time[self.in_transit].mean())
+        b = self.oot_transit & (self.time >= self.time[self.in_transit].mean())
 
         ts = self.channel_lcs
         ts = (ts.T/np.mean(ts, axis=1))
 
+        err = ts.T[~self.in_transit].std(axis=0).data
+        err /= (~self.in_transit).sum()**0.5
 
-        err = ts.T[~in_transit].std(axis=0).data
-        err /= (~in_transit).sum()**0.5
-
-        for idx, mask, col, label in zip([0, -1, 1], [in_transit, a, b], ['r', 'k', 'k'], ['In Transit', 'Before Transit', 'Out of Transit']):
-            y = np.average(d[mask], weights=1/e[mask], axis=(0, 1))
+        for idx, mask, col, label in zip([0, -1, 1], [self.in_transit, a, b], ['r', 'k', 'k'], ['In Transit', 'Before Transit', 'Out of Transit']):
+            y = np.average(ts[:, mask], axis=1)
             plt.errorbar(self.wavelength, 1 - y/np.median(y) + idx * offset, err, c=col)
             if idx == 0:
                 transmission_spectrum = 1 - y/np.median(y)
