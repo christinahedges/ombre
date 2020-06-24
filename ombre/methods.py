@@ -166,15 +166,11 @@ def calibrate(obs, teff, kdx=0):
     l = np.unravel_index(np.argmin(chi), chi.shape)
     params = [a[l[0]], b[l[1]]]
     wavelength = ((np.arange(obs.shape[2]) - params[1]) / params[0]) * dw + w_mean
-    sensitivity = np.interp(np.arange(0, obs.shape[2]), (wav.value - w_mean)/dw *  params[0] + params[1], sens_raw)
-
-    wavelength = ((np.arange(obs.shape[2]) - params[1]) / params[0]) * dw + w_mean
-    sensitivity = np.interp(np.arange(0, obs.shape[2]), (wav.value - w_mean)/dw *  params[0] + params[1], sens_raw)
-
+    sensitivity = np.interp(wavelength, wav, sens_raw)
     return sensitivity, wavelength
 
 
-def _build_X(obs, frames, frames_err):
+def _build_X(obs, frames, frames_err, transit=True, npoly=3):
     """ Build a design matrix for all the data in three dimensions. """
 
     # Build VSR model
@@ -196,14 +192,16 @@ def _build_X(obs, frames, frames_err):
     for tdx in tqdm(range(obs.nt), desc='Building VSR Component'):
         X1[tdx * obs.nsp * obs.nwav : (tdx + 1) * obs.nsp * obs.nwav, tdx * As.shape[2] : (tdx + 1) * As.shape[2]] = As[tdx]
 
-    prior_mu = [1, 0, 0, 0]
-    prior_sigma = [0.5, 0.5, 0.5, 0.5]
+    prior_mu = [0, 0, 0, 0]
+    prior_sigma = [0.05, 0.05, 0.05, 0.05]
     prior_mu = np.hstack(prior_mu * obs.nt)
     prior_sigma = np.hstack(prior_sigma * obs.nt)
 
 
+
+
     # Build spectral dimension
-    def _make_A(obs, npoly=3):
+    def _make_A(obs, npoly):
 
         xshift = obs.xshift
         xshift -= np.mean(xshift)
@@ -211,7 +209,7 @@ def _build_X(obs, frames, frames_err):
         xshift = np.atleast_3d(xshift).transpose([1, 0, 2]) * np.ones(obs.shape)
         t2 = sparse.csr_matrix(xshift[:, :, 0].ravel()).T
 
-        y, t = sparse.csr_matrix(obs.Y[:, :, 0].ravel() - obs.Y.min()).T, sparse.csr_matrix(obs.T[:, :, 0].ravel() - obs.T.min()).T
+        y, t = sparse.csr_matrix(obs.Y[:, :, 0].ravel()).T, sparse.csr_matrix(obs.T[:, :, 0].ravel()).T
 
         ones = sparse.csr_matrix(np.ones(y.shape[0])).T
         #delta_depth = sparse.csr_matrix((np.atleast_2d((obs.model_lc != 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
@@ -232,28 +230,38 @@ def _build_X(obs, frames, frames_err):
         A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T], format='csr')
 
         A = sparse.hstack([A, A1])
-
         return A
-    A = _make_A(obs)
+
+
+    A = _make_A(obs, npoly)
     X2 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
     x = np.unique(obs.X)
     for idx in tqdm(range(obs.nwav), desc='Building Spectrum Component'):
         X2[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
     prior_mu = np.hstack([prior_mu, np.zeros(X2.shape[1])])
-    prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.5])
-
-    A = sparse.csr_matrix((np.atleast_2d((obs.model_lc != 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
-    X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
-    x = np.unique(obs.X)
-    for idx in tqdm(range(obs.nwav), desc='Building Spectrum Component'):
-        X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
-
-    prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
-    prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.01])
-
-    X = sparse.hstack([X1, X2, X3], format='csr')
+    prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.05])
 
 
+    offset = sparse.hstack([sparse.csr_matrix((obs.spec_mean == s).ravel().astype(float)).T
+                                for s in tqdm(obs.spec_mean[0, 0], desc='Building Spec Offset')])
+
+    prior_mu = np.hstack([prior_mu, obs.spec_mean[0, 0]])
+    prior_sigma = np.hstack([prior_sigma, np.ones(obs.nwav) * 0.05])
+
+
+    if transit:
+       A = sparse.csr_matrix((np.atleast_2d((obs.model_lc - 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
+       X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
+       x = np.unique(obs.X)
+       for idx in tqdm(range(obs.nwav), desc='Building Transit Component'):
+           X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
+       prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
+       prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.05])
+
+       X = sparse.hstack([X1, X2, offset, X3], format='csr')
+    else:
+        X = sparse.hstack([X1, offset, X2], format='csr')
+        
     return X, prior_mu, prior_sigma
 
 
