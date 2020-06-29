@@ -22,6 +22,9 @@ from tqdm.notebook import tqdm
 
 from scipy.stats import pearsonr
 
+import exoplanet as xo
+import pymc3 as pm
+import theano.tensor as tt
 
 from . import PACKAGEDIR
 CALIPATH = '{}{}'.format(PACKAGEDIR, '/data/calibration/')
@@ -170,87 +173,107 @@ def calibrate(obs, teff, kdx=0):
     return sensitivity, wavelength
 
 
-def _build_X(obs, frames, frames_err, transit=True, npoly=3):
+def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offset=True, vsr=True, bkg=True, npoly=3):
     """ Build a design matrix for all the data in three dimensions. """
 
     # Build VSR model
     # Find principle component in spatial dimension
-    As = []
-    for tdx in range(obs.nt):
-        # Note we build 2 principle components, and only take the first one.
-        A, _, _ = pca(frames[tdx], k=2, n_iter=30)
-        A = A[:, 0, None]
+    if vsr:
+        As = []
+        for tdx in range(obs.nt):
+            # Note we build 2 principle components, and only take the first one.
+            A, _, _ = pca(frames[tdx], k=2, n_iter=30)
+            A = A[:, 0, None]
 
-        A = np.hstack([np.atleast_2d(np.ones(obs.nsp)).T, A])
-        A = np.vstack([(np.atleast_2d(a).T * np.ones(frames[0].shape)).ravel() for a in A.T]).T
-        A = np.hstack([A,
-                      A * np.atleast_2d(obs.X[0].ravel()).T,
-                     ])
-        As.append(A)
-    As = np.asarray(As)
+            A = np.hstack([np.atleast_2d(np.ones(obs.nsp)).T, A])
+            A = np.vstack([(np.atleast_2d(a).T * np.ones(frames[0].shape)).ravel() for a in A.T]).T
+            A = np.hstack([A,
+                          A * np.atleast_2d(obs.X[0].ravel()).T,
+                         ])
+            As.append(A)
+        As = np.asarray(As)
+    else:
+        As = np.ones((obs.nt, obs.nwav*obs.nsp, 1))
     X1 = sparse.lil_matrix((np.product(obs.shape), (As.shape[2] * obs.nt)))
     for tdx in tqdm(range(obs.nt), desc='Building VSR Component'):
         X1[tdx * obs.nsp * obs.nwav : (tdx + 1) * obs.nsp * obs.nwav, tdx * As.shape[2] : (tdx + 1) * As.shape[2]] = As[tdx]
 
-    prior_mu = [0, 0, 0, 0]
-    prior_sigma = [0.05, 0.05, 0.05, 0.05]
-    prior_mu = np.hstack(prior_mu * obs.nt)
-    prior_sigma = np.hstack(prior_sigma * obs.nt)
+    prior_mu = [0] * As.shape[2]
+    prior_sigma = [0.05] * As.shape[2]
+    prior_mu = np.hstack(prior_mu * obs.nt).astype(float)
+    prior_sigma = np.hstack(prior_sigma * obs.nt).astype(float)
+
+    X = X1
+
+    if spectrum:
+
+        # Build spectral dimension
+        def _make_A(obs, npoly):
+
+            xshift = obs.xshift
+            xshift -= np.mean(xshift)
+            xshift /= (np.max(xshift) - np.min(xshift))
+            xshift = np.atleast_3d(xshift).transpose([1, 0, 2]) * np.ones(obs.shape)
+            t2 = sparse.csr_matrix(xshift[:, :, 0].ravel()).T
+
+            y, t = sparse.csr_matrix(obs.Y[:, :, 0].ravel()).T, sparse.csr_matrix(obs.T[:, :, 0].ravel()).T
+
+            ones = sparse.csr_matrix(np.ones(y.shape[0])).T
+            #delta_depth = sparse.csr_matrix((np.atleast_2d((obs.model_lc != 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
+
+            def poly(x, npoly):
+                mul = lambda x: x.multiply(x)
+                r = sparse.csr_matrix(np.ones(x.shape[0])).T
+                r = sparse.hstack([r, x], format='csr')
+                for i in range(npoly - 2):
+                    r = sparse.hstack([r, mul(r[:, -1])], format='csr')
+                return r
+
+            At = poly(t, npoly)
+            At2 = poly(t2, npoly)
+            Ay = poly(y, npoly)
+
+            A = sparse.hstack([(At.T.multiply(A)).T for A in Ay.T], format='csr')
+            A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T], format='csr')
+
+            A = sparse.hstack([A, A1])
+            return A
+
+
+        A = _make_A(obs, npoly)
+        X2 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
+        x = np.unique(obs.X)
+        for idx in tqdm(range(obs.nwav), desc='Building Spectrum Component'):
+            X2[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
+        prior_mu = np.hstack([prior_mu, np.zeros(X2.shape[1])])
+        prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.05])
+
+        X = sparse.hstack([X, X2], format='csr')
+
+
+    if bkg:
+        bkg0 = (np.ones(obs.shape).T * obs.bkg).T
+        bkg1 = (obs.spec_mean.T * obs.bkg).T
+        bkg2 = (obs.spec_mean.T**2 * obs.bkg).T
+        bkg3 = (obs.spec_mean.T**3 * obs.bkg).T
+        X_bkg = sparse.csr_matrix(np.vstack([bkg0.ravel(), bkg1.ravel(), bkg2.ravel(), bkg3.ravel()]).T)
+        X = sparse.hstack([X, X_bkg], format='csr')
+        prior_sigma = np.hstack([prior_sigma, [0.05, 0.05, 0.05, 0.05]])
+        prior_mu = np.hstack([prior_mu, [0, 0, 0, 0]])
 
 
 
+    if spectrum_offset:
+        offset = sparse.hstack([sparse.csr_matrix((obs.spec_mean == s).ravel().astype(float)).T
+                                    for s in tqdm(obs.spec_mean[0, 0], desc='Building Spec Offset')])
 
-    # Build spectral dimension
-    def _make_A(obs, npoly):
-
-        xshift = obs.xshift
-        xshift -= np.mean(xshift)
-        xshift /= (np.max(xshift) - np.min(xshift))
-        xshift = np.atleast_3d(xshift).transpose([1, 0, 2]) * np.ones(obs.shape)
-        t2 = sparse.csr_matrix(xshift[:, :, 0].ravel()).T
-
-        y, t = sparse.csr_matrix(obs.Y[:, :, 0].ravel()).T, sparse.csr_matrix(obs.T[:, :, 0].ravel()).T
-
-        ones = sparse.csr_matrix(np.ones(y.shape[0])).T
-        #delta_depth = sparse.csr_matrix((np.atleast_2d((obs.model_lc != 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
-
-        def poly(x, npoly):
-            mul = lambda x: x.multiply(x)
-            r = sparse.csr_matrix(np.ones(x.shape[0])).T
-            r = sparse.hstack([r, x], format='csr')
-            for i in range(npoly - 2):
-                r = sparse.hstack([r, mul(r[:, -1])], format='csr')
-            return r
-
-        At = poly(t, npoly)
-        At2 = poly(t2, npoly)
-        Ay = poly(y, npoly)
-
-        A = sparse.hstack([(At.T.multiply(A)).T for A in Ay.T], format='csr')
-        A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T], format='csr')
-
-        A = sparse.hstack([A, A1])
-        return A
-
-
-    A = _make_A(obs, npoly)
-    X2 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
-    x = np.unique(obs.X)
-    for idx in tqdm(range(obs.nwav), desc='Building Spectrum Component'):
-        X2[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
-    prior_mu = np.hstack([prior_mu, np.zeros(X2.shape[1])])
-    prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.05])
-
-
-    offset = sparse.hstack([sparse.csr_matrix((obs.spec_mean == s).ravel().astype(float)).T
-                                for s in tqdm(obs.spec_mean[0, 0], desc='Building Spec Offset')])
-
-    prior_mu = np.hstack([prior_mu, obs.spec_mean[0, 0]])
-    prior_sigma = np.hstack([prior_sigma, np.ones(obs.nwav) * 0.05])
+        prior_mu = np.hstack([prior_mu, obs.spec_mean[0, 0]])
+        prior_sigma = np.hstack([prior_sigma, np.ones(obs.nwav) * 0.05])
+        X = sparse.hstack([X, offset], format='csr')
 
 
     if transit:
-       A = sparse.csr_matrix((np.atleast_2d((obs.model_lc - 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
+       A = sparse.csr_matrix((np.atleast_2d((obs.model_lc - obs.model_lc_no_ld).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
        X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
        x = np.unique(obs.X)
        for idx in tqdm(range(obs.nwav), desc='Building Transit Component'):
@@ -258,10 +281,19 @@ def _build_X(obs, frames, frames_err, transit=True, npoly=3):
        prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
        prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.05])
 
-       X = sparse.hstack([X1, X2, offset, X3], format='csr')
-    else:
-        X = sparse.hstack([X1, offset, X2], format='csr')
-        
+       X = sparse.hstack([X, X3], format='csr')
+
+
+       A = sparse.csr_matrix((np.atleast_2d((obs.model_lc_no_ld - 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
+       X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
+       x = np.unique(obs.X)
+       for idx in tqdm(range(obs.nwav), desc='Building Transit Component'):
+           X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
+       prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
+       prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.05])
+
+       X = sparse.hstack([X, X3], format='csr')
+
     return X, prior_mu, prior_sigma
 
 
@@ -493,3 +525,74 @@ def build_spectrum(obs, errors=False, npoly=2):
         return y_model, y_model_errs, np.asarray(ws)
 #    y_model = (y_model.T / np.mean(y_model, axis=(1, 2))).T
     return y_model, np.asarray(ws)
+
+
+def fit_transit(obs):
+    x, y, yerr = obs.time, obs.average_lc, obs.average_lc_errors
+
+    t0_val = obs.sys.secondaries[0].t0.eval()
+    period = obs.sys.secondaries[0].porb.eval()
+    o = np.hstack([(obs.time[o] - obs.time[o].min())/(obs.time[o].max() - obs.time[o].min()) - 0.5 for o in obs.orbits.T])
+    exptime = np.median(obs.exptime) / (3600 * 24)
+
+    with pm.Model() as model:
+
+        # The baseline flux
+
+        norm = pm.Normal("norm", mu=y.mean(), sd=y.std())
+
+        r_star = obs.sys.primary.r.eval()
+        m_star = obs.sys.primary.m.eval()
+
+        # The time of a reference transit for each planet
+        t0 = pm.Uniform("t0", lower=t0_val-period/2, upper=t0_val+period/2, testval=t0_val)
+
+        # The Kipping (2013) parameterization for quadratic limb darkening paramters
+        u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
+
+        r = pm.Normal(
+            "r", mu=obs.sys.secondaries[0].r.eval(), sd=obs.sys.secondaries[0].r.eval()*0.3)
+        ror = pm.Deterministic("ror", r / r_star)
+        b = xo.ImpactParameter("b", ror=ror)
+
+        # Set up a Keplerian orbit for the planets
+        orbit = xo.orbits.KeplerianOrbit(period=period, t0=t0, r_star=r_star, m_star=m_star, b=b)
+
+        # Compute the model light curve using starry
+        light_curves = xo.LimbDarkLightCurve(u).get_light_curve(
+            orbit=orbit, r=r, t=x, texp=exptime
+        )
+
+        light_curve = pm.Deterministic('light_curve', (pm.math.sum(light_curves, axis=-1)))
+        w = pm.Normal('w', mu=0, sd=10, testval=0, shape=4)
+        noise_model = pm.Deterministic('noise_model', w[0] * obs.xshift +
+                                                      w[1] * o +
+                                                      w[2] * o**2 +
+                                                      w[3] * obs.bkg)
+
+            # Compute the model light curve using starry
+        no_limb = pm.Deterministic('no_limb', pm.math.sum(xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(orbit=orbit, r=r, t=x, texp=exptime), axis=-1))
+
+
+        if np.asarray(obs.forward).all() | np.asarray(~obs.forward).all():
+            s = pm.Normal('s', mu=np.asarray([1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1]), shape=3)
+            star_model = pm.Deterministic('star_model', s[0] + s[1] * (x - x.mean()) + s[2] * (x - x.mean()))
+        else:
+            s = pm.Normal('s', mu=np.asarray([1, 1, 0, 0, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1, 0.1, 0.1, 0.1]), shape=6)
+            fw = obs.forward.astype(float)
+            bw = (~obs.forward).astype(float)
+            star_model = pm.Deterministic('star_model', s[0] * bw + s[1] * fw +
+                                                        s[2] * bw * (x - x.mean()) + s[3] * fw * (x - x.mean()),
+                                                        s[4] * bw * (x - x.mean())**2 + s[5] * fw * (x - x.mean())**2)
+
+        A = pm.Uniform('A', lower=0, upper=0.3, testval=1e-5)
+        v = pm.Uniform('v', lower=-300, upper=-50, testval=-100)
+        hook_model = pm.Deterministic('hook_model', A * -np.exp(v * (x - x[0])))
+
+
+        full_model = pm.Deterministic('full_model', (light_curve + noise_model + star_model + hook_model) * norm)
+
+        pm.Normal("obs", mu=full_model, sd=yerr, observed=y)
+
+        map_soln = xo.optimize(start=None, verbose=False)
+    return map_soln

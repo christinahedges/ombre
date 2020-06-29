@@ -1,6 +1,7 @@
 """Class to handle all the book-keeping of an HST observation"""
 
 import numpy as np
+from numpy import ma
 from glob import glob
 from datetime import datetime
 import warnings
@@ -17,7 +18,7 @@ from astropy.convolution import convolve, Box2DKernel
 
 from astroquery.mast import Observations as astropyObs
 
-from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum, fit_data
+from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum, fit_data, fit_transit
 
 from starry.extensions import from_nexsci
 
@@ -33,7 +34,8 @@ class Observation(object):
                             'sun_alt', 'velocity_aberration', '_filenames', 'sci',
                             'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
                              'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward', 'orbits',
-                             'ra', 'dec', 'nt', 'ns', 'sys', 'teff']]
+                             'ra', 'dec', 'nt', 'ns', 'sys', 'teff', 'bkg',
+                              'model_lc', 'model_lc_no_ld', 'wl_map_soln']]
 
     @staticmethod
     def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
@@ -133,6 +135,11 @@ class Observation(object):
         self._build_masks()
         self._build_data()
         self.sensitivity, self.wavelength = calibrate(self, self.teff)
+
+        m1 = convolve((self.sci < 5).any(axis=0), Box2DKernel(20), boundary='fill', fill_value=1) < 0.9
+        m = m1 | (self.err/self.sci > 0.5)
+        bkg = sigma_clipped_stats(ma.masked_array(self.sci, m), axis=(1, 2), sigma=3)[1]
+        self.bkg = bkg - np.median(bkg)
         return self
 
     def _load_data(self):
@@ -237,9 +244,10 @@ class Observation(object):
                             'hdrs', 'postarg1', 'postarg2', 'visits',
                             'sun_alt', 'velocity_aberration', '_filenames', 'sci',
                             'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
-                             'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward'] if hasattr(copyself, key)]
+                             'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward',
+                              'bkg', 'model_lc', 'model_lc_no_ld'] if hasattr(copyself, key)]
         [setattr(copyself, key, getattr(self, key))
-                for key in ['ra', 'dec', 'nt', 'ns', 'sys', 'teff']]
+                for key in ['ra', 'dec', 'nt', 'ns', 'sys', 'teff', 'wl_map_soln'] if hasattr(copyself, key)]
 #        import pdb;pdb.set_trace()
         copyself.nt = len(copyself.time)
         copyself._build_masks()
@@ -312,21 +320,27 @@ class Observation(object):
     def __repr__(self):
         return '{} (WFC3 Observation)'.format(self.name)
 
-    @property
-    def model_lc(self):
-        return self.sys.flux(self.time).eval()
 
+    def fit_transit(self):
+        self.wl_map_soln = fit_transit(self)
+        self.model_lc = self.wl_map_soln['light_curve'] + 1
+        self.model_lc_no_ld = self.wl_map_soln['no_limb'] + 1
+
+    # @property
+    # def model_lc(self):
+    #     return self.sys.flux(self.time).eval()
+    #
     @property
     def average_lc(self):
         lc = np.average((self.data/self.model), weights=(self.model/self.error), axis=(1, 2))
-        norm = np.median(lc[self.model_lc == 1])
-        return lc/norm
+#        norm = np.median(lc[self.model_lc == 1])
+        return lc#/norm
 
-    # @property
-    # def average_lc_errors(self):
-    #     m = np.atleast_3d(self.vsr_mean.mean(axis=0) > 0.93).transpose([2, 0, 1]) * np.ones(self.shape)
-    #     draws = np.random.normal(self.data/self.model, self.error/self.model, size=(50, *self.shape))
-    #     return np.asarray([np.average(d * m, weights=np.nan_to_num(self.model/self.error) * m, axis=(1, 2)) for d in draws]).std(axis=0)
+    @property
+    def average_lc_errors(self):
+        s = np.random.normal(self.data, self.error, size=(30, *self.shape))
+        yerr = np.std([np.average(s1, weights=1/self.error, axis=(1, 2)) for s1 in s], axis=0)
+        return yerr
 
     @property
     def channel_lcs(self):
@@ -368,14 +382,14 @@ class Observation(object):
         r = (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
         return r
 
-
-    @property
-    def in_transit(self):
-        return (self.model_lc < self.model_lc.min() + (1 - self.model_lc.min()) * 0.2)
-
-    @property
-    def oot_transit(self):
-        return (self.model_lc == 1) & (self.time > self.time[5])
+    #
+    # @property
+    # def in_transit(self):
+    #     return (self.model_lc < self.model_lc.min() + (1 - self.model_lc.min()) * 0.2)
+    #
+    # @property
+    # def oot_transit(self):
+    #     return (self.model_lc == 1) & (self.time > self.time[5])
 
     def plot_average_lc(self, ax=None, errors=False):
         if ax is None:
@@ -401,7 +415,9 @@ class Observation(object):
             ax1.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
         ax1.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
         t = np.linspace(self.time[0], self.time[-1], 1000)
-        ax1.plot(t, self.sys.flux(t).eval(), c='b', label='model')
+        if self.wl_map_soln is not None:
+            ax1.scatter(self.time, self.wl_map_soln['light_curve'] + 1)
+#        ax1.plot(t, self.sys.flux(t).eval(), c='b', label='model')
         ax1.legend()
         if ax is None:
             return fig
