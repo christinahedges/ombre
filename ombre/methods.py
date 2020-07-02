@@ -102,19 +102,15 @@ def average_spectrum(obs):
     spec_mean /= np.mean(spec_mean)
     return (np.atleast_3d(spec_mean) * np.ones(obs.shape).transpose([0, 2, 1])).transpose([0, 2, 1])
 
-
-def get_flatfield(obs, model):
+def get_flatfield(obs, visit, model):
     ''' Get flat field'''
     g141_flatfile = CALIPATH+'WFC3.IR.G141.flat.2.fits'
     ff_hdu = fits.open(g141_flatfile)
 
-    #a1, a2 = np.where(obs.spatial[0, :, 0])[0][0] , np.where(obs.spatial[0, :, 0])[0][-1] + 1
-    #b1, b2 = np.where(obs.spectral[0, 0, :])[0][0] , np.where(obs.spectral[0, 0, :])[0][-1] + 1
+    nt, nrow, ncol = visit.shape
 
-    # Some handy shapes
-    nt, nrow, ncol = obs.shape
 
-    norm = np.nansum(obs.sci, axis=(1, 2))
+    norm = np.nansum(visit.data, axis=(1, 2))
     norm /= np.median(norm)
     norm = np.atleast_3d(norm).transpose([1, 0, 2])
 
@@ -122,10 +118,9 @@ def get_flatfield(obs, model):
     f = f[:, 1014//2 - obs.ns//2 : 1014//2 + obs.ns//2, 1014//2 - obs.ns//2 : 1014//2 + obs.ns//2]
 
     f = np.vstack([f, np.ones((1, f.shape[1], f.shape[2]))])
-    X = f[:, obs.spatial.reshape(-1)][:, :, obs.spectral.reshape(-1)][:, np.ones((nrow, ncol), bool)].T
-
-    avg = np.nanmean((obs.data/norm/model), axis=0)[np.ones((nrow, ncol), bool)]
-    avg_err = ((1/nt)*np.nansum(((obs.error/norm/model))**2, axis=0)**0.5)[np.ones((nrow, ncol), bool)]
+    X = f[:, visit.spatial.reshape(-1)][:, :, visit.spectral.reshape(-1)][:, np.ones((nrow, ncol), bool)].T
+    avg = np.nanmean((visit.data/norm/model), axis=0)[np.ones((nrow, ncol), bool)]
+    avg_err = ((1/nt)*np.nansum(((visit.error/norm/model))**2, axis=0)**0.5)[np.ones((nrow, ncol), bool)]
 
     sigma_w_inv = np.dot(X.T, X/avg_err[:, None]**2)
     B = np.dot(X.T, (avg/avg_err**2)[:, None])
