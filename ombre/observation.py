@@ -35,10 +35,10 @@ class Observation(object):
                             'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
                              'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward', 'orbits',
                              'ra', 'dec', 'nt', 'ns', 'sys', 'teff', 'bkg',
-                              'model_lc', 'model_lc_no_ld', 'wl_map_soln']]
+                              'model_lc', 'model_lc_no_ld', 'wl_map_soln', 'trace']]
 
     @staticmethod
-    def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
+    def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None, load_only=True):
         """HST Observation.
 
         Parameters
@@ -107,8 +107,9 @@ class Observation(object):
                 for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'hdrs', 'filenames']]
         mask = mask[s]
 
-        self.nvisits = len(np.unique(np.round(self.start_date, -1)))
-        self.visits = np.unique(np.round(self.start_date, -1), return_inverse=True)[1] + 1
+        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 1)]
+        self.nvisits = len(start_dates)
+        self.visits = np.vstack([(np.abs(self.start_date - s) < 2) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
 
         if visit != None:
             if visit > self.nvisits:
@@ -127,11 +128,17 @@ class Observation(object):
         self.nt = np.sum(mask)
         aperture = self.hdrs[0]['APERTURE']
         self.ns = int(''.join([a for a in aperture if a.isnumeric()]))
+        if self.ns == 1024:
+            self.ns = 1014
         self._filenames = np.asarray(self.filenames)[mask]
         self.forward = self.postarg2 > 0
 
-
         self._load_data()
+        orbits = np.where(np.append(0, np.diff(self.time)) > 0.015)[0]
+        self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)]).T
+
+        if load_only:
+            return self
         self._build_masks()
         self._build_data()
         self.sensitivity, self.wavelength = calibrate(self, self.teff)
@@ -223,10 +230,6 @@ class Observation(object):
 #        self._bad_rows = (np.atleast_3d(sigma_clip(chi, sigma=8).mask)) * np.ones(self.shape, bool)
 
 
-        orbits = np.where(np.append(0, np.diff(self.time)) > 0.015)[0]
-        self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)]).T
-
-
     def __len__(self):
         return self.nt
 
@@ -245,9 +248,12 @@ class Observation(object):
                             'sun_alt', 'velocity_aberration', '_filenames', 'sci',
                             'err', 'dq', 'data', 'error', 'vsr_mean', 'spec_mean',
                              'model', 'cosmic_rays', 'X', 'Y', 'T', 'xshift', 'forward',
-                              'bkg', 'model_lc', 'model_lc_no_ld'] if hasattr(copyself, key)]
+                              'bkg'] if hasattr(copyself, key)]
+        if self.model_lc is not None:
+            [setattr(copyself, key, getattr(self, key)[s])
+                    for key in ['model_lc', 'model_lc_no_ld'] if hasattr(copyself, key)]
         [setattr(copyself, key, getattr(self, key))
-                for key in ['ra', 'dec', 'nt', 'ns', 'sys', 'teff', 'wl_map_soln'] if hasattr(copyself, key)]
+                for key in ['ra', 'dec', 'nt', 'ns', 'sys', 'teff', 'wl_map_soln', 'trace'] if hasattr(copyself, key)]
 #        import pdb;pdb.set_trace()
         copyself.nt = len(copyself.time)
         copyself._build_masks()
@@ -298,8 +304,9 @@ class Observation(object):
         paths = np.asarray(download_target(targetname))
 
         if isinstance(visit, int):
-            start_time = np.asarray([Time(datetime.strptime('{}'.format(fits.open(fname)[0].header['DATE-OBS']), '%Y-%m-%d')).jd for fname in paths])
-            visits = np.asarray([np.where(np.sort(np.unique(start_time)) == t1)[0][0] + 1 for t1 in start_time])
+#            start_time = np.asarray([Time(datetime.strptime('{}'.format(fits.open(fname)[0].header['DATE-OBS']), '%Y-%m-%d')).jd for fname in paths])
+            start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 1)]
+            visits = np.asarray([np.where(np.sort(np.unique(start_date)) == t1)[0][0] + 1 for t1 in start_dates])
             mask = visits == visit
             if not mask.any():
                 raise ValueError('No data in visit {}'.format(visit))
@@ -321,8 +328,11 @@ class Observation(object):
         return '{} (WFC3 Observation)'.format(self.name)
 
 
-    def fit_transit(self):
-        self.wl_map_soln = fit_transit(self)
+    def fit_transit(self, sample=True):
+        if sample:
+            self.wl_map_soln, self.trace = fit_transit(self, sample=sample)
+        else:
+            self.wl_map_soln = fit_transit(self, sample=sample)
         self.model_lc = self.wl_map_soln['light_curve'] + 1
         self.model_lc_no_ld = self.wl_map_soln['no_limb'] + 1
 

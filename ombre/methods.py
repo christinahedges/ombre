@@ -67,12 +67,12 @@ def animate(data, scale='linear', output='out.mp4', **kwargs):
     anim.save(output, dpi=150)
 
 
-def simple_mask(observation, spectral_cut=0.2, spatial_cut=0.2):
+def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.3):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
-        mask = np.atleast_3d(observation.sci.mean(axis=0) > np.nanpercentile(observation.sci, 50)).transpose([2, 0, 1])
+        mask = np.atleast_3d(sci.mean(axis=0) > np.nanpercentile(sci, 50)).transpose([2, 0, 1])
 
-        data = observation.sci/mask
+        data = sci/mask
         data[~np.isfinite(data)] = np.nan
 
         spectral = np.nanmean(data, axis=(0, 1))
@@ -527,7 +527,7 @@ def build_spectrum(obs, errors=False, npoly=2):
     return y_model, np.asarray(ws)
 
 
-def fit_transit(obs):
+def fit_transit(obs, sample=True):
     x, y, yerr = obs.time, obs.average_lc, obs.average_lc_errors
 
     t0_val = obs.sys.secondaries[0].t0.eval()
@@ -564,11 +564,23 @@ def fit_transit(obs):
         )
 
         light_curve = pm.Deterministic('light_curve', (pm.math.sum(light_curves, axis=-1)))
-        w = pm.Normal('w', mu=0, sd=10, testval=0, shape=4)
-        noise_model = pm.Deterministic('noise_model', w[0] * obs.xshift +
-                                                      w[1] * o +
-                                                      w[2] * o**2 +
-                                                      w[3] * obs.bkg)
+        if np.asarray(obs.forward).all() | np.asarray(~obs.forward).all():
+            w = pm.Normal('w', mu=0, sd=10, testval=0, shape=3)
+            noise_model = pm.Deterministic('noise_model', w[0] * obs.xshift +
+                                                          w[1] * o +
+                                                          w[2] * obs.bkg)
+        else:
+            fw = obs.forward.astype(float)
+            bw = (~obs.forward).astype(float)
+
+            w = pm.Normal('w', mu=0, sd=10, testval=0, shape=6)
+            noise_model = pm.Deterministic('noise_model', fw * w[0] * obs.xshift +
+                                                          fw * w[1] * o +
+                                                          fw * w[2] * obs.bkg +
+                                                          bw * w[3] * obs.xshift +
+                                                          bw * w[4] * o +
+                                                          bw * w[5] * obs.bkg
+                                                        )
 
             # Compute the model light curve using starry
         no_limb = pm.Deterministic('no_limb', pm.math.sum(xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(orbit=orbit, r=r, t=x, texp=exptime), axis=-1))
@@ -578,12 +590,12 @@ def fit_transit(obs):
             s = pm.Normal('s', mu=np.asarray([1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1]), shape=3)
             star_model = pm.Deterministic('star_model', s[0] + s[1] * (x - x.mean()) + s[2] * (x - x.mean()))
         else:
-            s = pm.Normal('s', mu=np.asarray([1, 1, 0, 0, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1, 0.1, 0.1, 0.1]), shape=6)
+            s = pm.Normal('s', mu=np.asarray([1, 1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1, 0.1]), shape=4)
             fw = obs.forward.astype(float)
             bw = (~obs.forward).astype(float)
             star_model = pm.Deterministic('star_model', s[0] * bw + s[1] * fw +
-                                                        s[2] * bw * (x - x.mean()) + s[3] * fw * (x - x.mean()),
-                                                        s[4] * bw * (x - x.mean())**2 + s[5] * fw * (x - x.mean())**2)
+                                                        s[2] * (x - x.mean()) +
+                                                        s[3] * (x - x.mean())**2)
 
         A = pm.Uniform('A', lower=0, upper=0.3, testval=1e-5)
         v = pm.Uniform('v', lower=-300, upper=-50, testval=-100)
@@ -593,6 +605,10 @@ def fit_transit(obs):
         full_model = pm.Deterministic('full_model', (light_curve + noise_model + star_model + hook_model) * norm)
 
         pm.Normal("obs", mu=full_model, sd=yerr, observed=y)
-
         map_soln = xo.optimize(start=None, verbose=False)
-    return map_soln
+        if sample:
+            trace = xo.sample(
+                tune=500, draws=1000, start=map_soln, chains=4, target_accept=0.95
+            )
+            return map_soln, pm.trace_to_dataframe(trace)
+        return map_soln
