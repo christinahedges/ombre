@@ -190,7 +190,7 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
     else:
         As = np.ones((obs.nt, obs.nwav*obs.nsp, 1))
     X1 = sparse.lil_matrix((np.product(obs.shape), (As.shape[2] * obs.nt)))
-    for tdx in tqdm(range(obs.nt), desc='Building VSR Component'):
+    for tdx in range(obs.nt):
         X1[tdx * obs.nsp * obs.nwav : (tdx + 1) * obs.nsp * obs.nwav, tdx * As.shape[2] : (tdx + 1) * As.shape[2]] = As[tdx]
 
     prior_mu = [0] * As.shape[2]
@@ -238,7 +238,7 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
         A = _make_A(obs, npoly)
         X2 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
         x = np.unique(obs.X)
-        for idx in tqdm(range(obs.nwav), desc='Building Spectrum Component'):
+        for idx in range(obs.nwav):
             X2[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
         prior_mu = np.hstack([prior_mu, np.zeros(X2.shape[1])])
         prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.05])
@@ -260,7 +260,7 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
 
     if spectrum_offset:
         offset = sparse.hstack([sparse.csr_matrix((obs.spec_mean == s).ravel().astype(float)).T
-                                    for s in tqdm(obs.spec_mean[0, 0], desc='Building Spec Offset')])
+                                    for s in obs.spec_mean[0, 0]])
 
         prior_mu = np.hstack([prior_mu, obs.spec_mean[0, 0]])
         prior_sigma = np.hstack([prior_sigma, np.ones(obs.nwav) * 0.05])
@@ -271,7 +271,7 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
        A = sparse.csr_matrix((np.atleast_2d((obs.model_lc - obs.model_lc_no_ld).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
        X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
        x = np.unique(obs.X)
-       for idx in tqdm(range(obs.nwav), desc='Building Transit Component'):
+       for idx in range(obs.nwav):
            X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
        prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
        prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.05])
@@ -282,7 +282,7 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
        A = sparse.csr_matrix((np.atleast_2d((obs.model_lc_no_ld - 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
        X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
        x = np.unique(obs.X)
-       for idx in tqdm(range(obs.nwav), desc='Building Transit Component'):
+       for idx in range(obs.nwav):
            X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
        prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
        prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.05])
@@ -521,32 +521,133 @@ def build_spectrum(obs, errors=False, npoly=2):
 #    y_model = (y_model.T / np.mean(y_model, axis=(1, 2))).T
     return y_model, np.asarray(ws)
 
+#
+# def fit_transit(obs, sample=True):
+#     x, y, yerr = obs.time, obs.average_lc, obs.average_lc_errors
+#
+#     t0_val = obs.sys.secondaries[0].t0.eval()
+#     period = obs.sys.secondaries[0].porb.eval()
+#     o = np.hstack([(obs.time[o] - obs.time[o].min())/(obs.time[o].max() - obs.time[o].min()) - 0.5 for o in obs.orbits.T])
+#     exptime = np.median(obs.exptime) / (3600 * 24)
+#
+#     with pm.Model() as model:
+#
+#         # The baseline flux
+#
+#         norm = pm.Normal("norm", mu=y.mean(), sd=y.std())
+#
+#         r_star = obs.sys.primary.r.eval()
+#         m_star = obs.sys.primary.m.eval()
+#
+#         # The time of a reference transit for each planet
+#         t0 = pm.Uniform("t0", lower=t0_val-period/2, upper=t0_val+period/2, testval=t0_val)
+#
+#         # The Kipping (2013) parameterization for quadratic limb darkening paramters
+#         u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
+#
+#         r = pm.Normal(
+#             "r", mu=obs.sys.secondaries[0].r.eval(), sd=obs.sys.secondaries[0].r.eval()*0.3)
+#         ror = pm.Deterministic("ror", r / r_star)
+#         b = xo.ImpactParameter("b", ror=ror)
+#
+#         # Set up a Keplerian orbit for the planets
+#         orbit = xo.orbits.KeplerianOrbit(period=period, t0=t0, r_star=r_star, m_star=m_star, b=b)
+#
+#         # Compute the model light curve using starry
+#         light_curves = xo.LimbDarkLightCurve(u).get_light_curve(
+#             orbit=orbit, r=r, t=x, texp=exptime
+#         )
+#
+#         light_curve = pm.Deterministic('light_curve', (pm.math.sum(light_curves, axis=-1)))
+#         if np.asarray(obs.forward).all() | np.asarray(~obs.forward).all():
+#             w = pm.Normal('w', mu=0, sd=10, testval=0, shape=3)
+#             noise_model = pm.Deterministic('noise_model', w[0] * obs.xshift +
+#                                                           w[1] * o +
+#                                                           w[2] * obs.bkg)
+#         else:
+#             fw = obs.forward.astype(float)
+#             bw = (~obs.forward).astype(float)
+#
+#             w = pm.Normal('w', mu=0, sd=10, testval=0, shape=6)
+#             noise_model = pm.Deterministic('noise_model', fw * w[0] * obs.xshift +
+#                                                           fw * w[1] * o +
+#                                                           fw * w[2] * obs.bkg +
+#                                                           bw * w[3] * obs.xshift +
+#                                                           bw * w[4] * o +
+#                                                           bw * w[5] * obs.bkg
+#                                                         )
+#
+#             # Compute the model light curve using starry
+#         no_limb = pm.Deterministic('no_limb', pm.math.sum(xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(orbit=orbit, r=r, t=x, texp=exptime), axis=-1))
+#
+#
+#         if np.asarray(obs.forward).all() | np.asarray(~obs.forward).all():
+#             s = pm.Normal('s', mu=np.asarray([1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1]), shape=3)
+#             star_model = pm.Deterministic('star_model', s[0] + s[1] * (x - x.mean()) + s[2] * (x - x.mean()))
+#         else:
+#             s = pm.Normal('s', mu=np.asarray([1, 1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1, 0.1]), shape=4)
+#             fw = obs.forward.astype(float)
+#             bw = (~obs.forward).astype(float)
+#             star_model = pm.Deterministic('star_model', s[0] * bw + s[1] * fw +
+#                                                         s[2] * (x - x.mean()) +
+#                                                         s[3] * (x - x.mean())**2)
+#
+#         A = pm.Uniform('A', lower=0, upper=0.3, testval=1e-5)
+#         v = pm.Uniform('v', lower=-300, upper=-50, testval=-100)
+#         hook_model = pm.Deterministic('hook_model', A * -np.exp(v * (x - x[0])))
+#
+#
+#         full_model = pm.Deterministic('full_model', (light_curve + noise_model + star_model + hook_model) * norm)
+#
+#         pm.Normal("obs", mu=full_model, sd=yerr, observed=y)
+#         map_soln = xo.optimize(start=None, verbose=False)
+#         if sample:
+#             trace = xo.sample(
+#                 tune=500, draws=1000, start=map_soln, chains=4, target_accept=0.95
+#             )
+#             return map_soln, pm.trace_to_dataframe(trace)
+#         return map_soln
 
-def fit_transit(obs, sample=True):
-    x, y, yerr = obs.time, obs.average_lc, obs.average_lc_errors
 
-    t0_val = obs.sys.secondaries[0].t0.eval()
-    period = obs.sys.secondaries[0].porb.eval()
-    o = np.hstack([(obs.time[o] - obs.time[o].min())/(obs.time[o].max() - obs.time[o].min()) - 0.5 for o in obs.orbits.T])
-    exptime = np.median(obs.exptime) / (3600 * 24)
+def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_val, r_star, m_star, exptime, sample=True):
+
+    x, y, yerr = np.hstack(t), np.hstack(lcs), np.hstack(lcs_err)
+    cadence_mask = y > 15
+    breaks = np.where(np.diff(x) > 2)[0] + 1
+    long_time = [(i - i.mean())/(i.max() - i.min()) for i in np.array_split(x, breaks)]
+    orbit_trends = [np.hstack([(t[idx][o] - t[idx][o].min())/(t[idx][o].max() - t[idx][o].min()) - 0.5 for o in orbits[idx][:, np.any(orbits[idx], axis=0)].T]) for idx in range(len(t))]
+
+    X = lambda x: np.vstack([np.atleast_2d(x[idx]).T * np.diag(np.ones(len(x)))[idx] for idx in range(len(x))])
+
+    orbit = X(orbit_trends)
+    bkg = X(background)
+    xs = X(xshift)
+    star = X(long_time)
+    ones = X([x1**0 for x1 in xshift])
+    hook = X([-np.exp(-300 * (t1 - t1[0])) for t1 in t])
+
+    A = np.hstack([hook, xs, bkg, ones, orbit, orbit**2, star, star**2])
+
+    # Hacky garbage
+    A = np.nan_to_num(A)
 
     with pm.Model() as model:
 
         # The baseline flux
+        norm = pm.Normal('norm', mu=y.mean(), sd=y.std(), shape=len(breaks) + 1)
 
-        norm = pm.Normal("norm", mu=y.mean(), sd=y.std())
-
-        r_star = obs.sys.primary.r.eval()
-        m_star = obs.sys.primary.m.eval()
+        normalization = pm.Deterministic('normalization', tt.concatenate([norm[idx] + np.zeros_like(x) for idx, x in enumerate(np.array_split(x, breaks))]))
 
         # The time of a reference transit for each planet
-        t0 = pm.Uniform("t0", lower=t0_val-period/2, upper=t0_val+period/2, testval=t0_val)
+        t0 = pm.Uniform("t0", lower=t0_val-period_val/2, upper=t0_val+period_val/2, testval=t0_val)
+        period = period_val
 
         # The Kipping (2013) parameterization for quadratic limb darkening paramters
-        u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
+        #u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
+        u = pm.Uniform('u', lower=0, upper=1, testval=0.5, shape=1)
 
         r = pm.Normal(
-            "r", mu=obs.sys.secondaries[0].r.eval(), sd=obs.sys.secondaries[0].r.eval()*0.3)
+            "r", mu=r, sd=r*0.3)
         ror = pm.Deterministic("ror", r / r_star)
         b = xo.ImpactParameter("b", ror=ror)
 
@@ -558,52 +659,107 @@ def fit_transit(obs, sample=True):
             orbit=orbit, r=r, t=x, texp=exptime
         )
 
-        light_curve = pm.Deterministic('light_curve', (pm.math.sum(light_curves, axis=-1)))
-        if np.asarray(obs.forward).all() | np.asarray(~obs.forward).all():
-            w = pm.Normal('w', mu=0, sd=10, testval=0, shape=3)
-            noise_model = pm.Deterministic('noise_model', w[0] * obs.xshift +
-                                                          w[1] * o +
-                                                          w[2] * obs.bkg)
-        else:
-            fw = obs.forward.astype(float)
-            bw = (~obs.forward).astype(float)
+        light_curve = pm.Deterministic('light_curve', (pm.math.sum(light_curves, axis=-1)) + 1)
 
-            w = pm.Normal('w', mu=0, sd=10, testval=0, shape=6)
-            noise_model = pm.Deterministic('noise_model', fw * w[0] * obs.xshift +
-                                                          fw * w[1] * o +
-                                                          fw * w[2] * obs.bkg +
-                                                          bw * w[3] * obs.xshift +
-                                                          bw * w[4] * o +
-                                                          bw * w[5] * obs.bkg
-                                                        )
-
-            # Compute the model light curve using starry
-        no_limb = pm.Deterministic('no_limb', pm.math.sum(xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(orbit=orbit, r=r, t=x, texp=exptime), axis=-1))
+        sigma_w_inv = tt.dot(A[cadence_mask].T, A[cadence_mask]/yerr[cadence_mask, None]**2)
+        B = tt.dot(A[cadence_mask].T, (y - (light_curve * normalization))[cadence_mask]/yerr[cadence_mask]**2)
+        w = tt.slinalg.solve(sigma_w_inv, B)
+        noise_model = pm.Deterministic('noise_model', tt.dot(A, w))
 
 
-        if np.asarray(obs.forward).all() | np.asarray(~obs.forward).all():
-            s = pm.Normal('s', mu=np.asarray([1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1]), shape=3)
-            star_model = pm.Deterministic('star_model', s[0] + s[1] * (x - x.mean()) + s[2] * (x - x.mean()))
-        else:
-            s = pm.Normal('s', mu=np.asarray([1, 1, 0, 0]), sd=np.asarray([0.1, 0.1, 0.1, 0.1]), shape=4)
-            fw = obs.forward.astype(float)
-            bw = (~obs.forward).astype(float)
-            star_model = pm.Deterministic('star_model', s[0] * bw + s[1] * fw +
-                                                        s[2] * (x - x.mean()) +
-                                                        s[3] * (x - x.mean())**2)
+        no_limb = pm.Deterministic('no_limb', pm.math.sum(xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(orbit=orbit, r=r, t=x, texp=exptime), axis=-1) + 1)
 
-        A = pm.Uniform('A', lower=0, upper=0.3, testval=1e-5)
-        v = pm.Uniform('v', lower=-300, upper=-50, testval=-100)
-        hook_model = pm.Deterministic('hook_model', A * -np.exp(v * (x - x[0])))
-
-
-        full_model = pm.Deterministic('full_model', (light_curve + noise_model + star_model + hook_model) * norm)
-
+        full_model = pm.Deterministic('full_model', (light_curve * normalization) + noise_model)
         pm.Normal("obs", mu=full_model, sd=yerr, observed=y)
+
+
         map_soln = xo.optimize(start=None, verbose=False)
         if sample:
             trace = xo.sample(
-                tune=500, draws=1000, start=map_soln, chains=4, target_accept=0.95
+                tune=200, draws=1000, start=map_soln, chains=4, target_accept=0.95
             )
             return map_soln, pm.trace_to_dataframe(trace)
         return map_soln
+
+
+def fit_transmission_spectrum(obs):
+    ts = []
+    ts_err = []
+    models = []
+    partial_models = []
+
+    for visit in obs.visits:
+        if (visit.model_lc == 1).all():
+            ts.append(None)
+            ts_err.append(None)
+            models.append(np.ones(visit.shape) * np.nan)
+            continue
+
+        in_transit = (visit.model_lc < visit.model_lc.min() + (1 - visit.model_lc.min()) * 0.2)
+        oot_transit = (visit.model_lc == 1)
+        wlc = visit.average_lc
+        m = (visit.spec_mean * visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
+        frames = visit.data / m
+        frames_err = visit.error  / m
+
+        frames_err = (frames_err.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
+        frames = (frames.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
+        frames[(frames_err/frames) > 0.1] = 1
+
+        X1, prior_mu1, prior_sigma1 = _build_X(visit, frames, frames_err, transit=False)
+
+        m = (visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
+
+        frames = visit.data / m
+        frames_err = visit.error / m
+
+        X_tr = sparse.lil_matrix((np.product(visit.shape), (visit.nwav)))
+
+        model_lc = visit.model_lc - 1
+        model_lc_no_ld = visit.model_lc_no_ld - 1
+
+        ld = model_lc - model_lc_no_ld
+        ld = ((np.ones(visit.shape).T * ld).T).ravel()
+        ld = sparse.hstack([sparse.csr_matrix(ld).T, sparse.csr_matrix(ld * visit.X.ravel()).T ], format='csr')
+
+        A = sparse.csr_matrix((np.atleast_2d((model_lc_no_ld).astype(float)).T * np.ones(visit.shape[:2])).ravel()).T
+        x = np.unique(visit.X)
+        X_tr = X_tr.multiply(0)
+        for jdx in range(visit.nwav):
+            X_tr[visit.X.ravel() == x[jdx], A.shape[1] * jdx : A.shape[1] * (jdx + 1)] = A
+
+        X_tr2 = sparse.hstack([ld, X_tr], format='csr')
+
+
+        X = sparse.hstack([X1, X_tr2], format='csr')
+        prior_mu = np.hstack([prior_mu1, [1, 0], [0] * visit.nwav])
+        prior_sigma = np.hstack([prior_sigma1, [0.05, 0.05], [0.05] * visit.nwav])
+
+        sigma_f_inv = sparse.csr_matrix(1/frames_err.ravel()**2)
+        sigma_w_inv = X.T.dot(X.multiply(sigma_f_inv.T)).toarray()
+        sigma_w_inv += np.diag(1. / prior_sigma**2)
+        B = X.T.dot((frames/frames_err**2).ravel())
+        B += (prior_mu / prior_sigma**2)
+        w = np.linalg.solve(sigma_w_inv, B)
+        model = (X.dot(w)).reshape(visit.shape)
+        sigma_w = np.linalg.solve(sigma_w_inv, np.eye(w.shape[0]))
+
+        ff = np.average((frames-model)[oot_transit], weights=1/frames_err[oot_transit], axis=0)
+
+        B = X.T.dot(((frames - ff)/frames_err**2).ravel())
+        B += (prior_mu / prior_sigma**2)
+        w = np.linalg.solve(sigma_w_inv, B)
+        model = (X.dot(w)).reshape(visit.shape)
+        partial_model = (X1.dot(w[:X1.shape[1]])).reshape(visit.shape)
+        partial_model -= np.mean(partial_model)
+        partial_model += np.mean(model)
+
+
+        depth = -model_lc.min()
+
+        ts.append(depth * 1e6 * w[-visit.nwav:])
+        ts_err.append(depth * 1e6 * (np.diag(sigma_w)**0.5)[-visit.nwav:])
+        models.append(model)
+        partial_models.append(partial_model)
+
+    return ts, ts_err, models, partial_models

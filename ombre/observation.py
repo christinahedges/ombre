@@ -10,6 +10,7 @@ from copy import deepcopy
 import matplotlib.pyplot as plt
 import os
 import logging
+from scipy import sparse
 
 from astropy.io import fits
 from astropy.time import Time
@@ -18,7 +19,7 @@ from astropy.convolution import convolve, Box2DKernel
 
 from astroquery.mast import Observations as astropyObs
 
-from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum, fit_data, fit_transit
+from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum, fit_data, fit_transit, fit_transmission_spectrum
 
 from starry.extensions import from_nexsci
 
@@ -26,27 +27,38 @@ log = logging.getLogger('ombre')
 
 class Visit(object):
 
-    def __init__(self, observation, visit_number, direction='forward'):
+    def __init__(self, observation, visit_number, direction='forward', cadence_mask=None):
+        if cadence_mask is None:
+            cadence_mask = np.ones(observation.nt, bool)
+
         self.visit_number = visit_number
         self.name = observation.name
 
+        s = np.copy(cadence_mask)
         if (direction.lower() in ['f', 'fw', 'fwd', 'forward']):
-            s = (observation.visit_number == visit_number) & (observation.forward)
+            s &= (observation.visit_number == visit_number) & (observation.forward)
             self.direction = 'forward'
         elif (direction.lower() in ['b', 'bw', 'bwd', 'backward', 'back']):
-            s = (observation.visit_number == visit_number) & (~observation.forward)
+            s &= (observation.visit_number == visit_number) & (~observation.forward)
             self.direction = 'backward'
         else:
             raise ValueError('No direction {}'.format(direction))
 
+        if not (observation.exptime[s] == np.median(observation.exptime[s])).all():
+           warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((observation.exptime[s] != np.median(observation.exptime[s])).sum(), len(observation.exptime[s])))
+
+        s &= observation.exptime == np.median(observation.exptime)
         self.cadence_mask = s
         orbits = observation.orbits[s]
         self.orbits = orbits[:, np.any(orbits, axis=0)]
+
         [setattr(self, key, getattr(observation, key)[s])
             for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
                         'hdrs', 'postarg1', 'postarg2',
                         'sun_alt', 'velocity_aberration', '_filenames', 'forward']
                          if hasattr(observation, key)]
+
+
         self.propid = self.propid[0]
         [setattr(self, key, getattr(observation, key))
             for key in ['ra', 'dec', 'teff']
@@ -163,9 +175,8 @@ class Visit(object):
             ax1.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
         ax1.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
         t = np.linspace(self.time[0], self.time[-1], 1000)
-#        if self.wl_map_soln is not None:
-#            ax1.scatter(self.time, self.wl_map_soln['light_curve'] + 1)
-#        ax1.plot(t, self.sys.flux(t).eval(), c='b', label='model')
+        if hasattr(self, 'model_lc'):
+            ax1.scatter(self.time, self.model_lc)
         if labels:
             ax1.legend()
         if ax is None:
@@ -212,7 +223,7 @@ class Observation(object):
                               'model_lc', 'model_lc_no_ld', 'wl_map_soln', 'trace']]
 
     @staticmethod
-    def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None, load_only=False):
+    def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
         """HST Observation.
 
         Parameters
@@ -256,9 +267,9 @@ class Observation(object):
         mask = (self.filters == 'G141') | (self.filters == 'G102')
 
         self.exptime = np.asarray([hdr['EXPTIME'] for hdr in self.hdrs])
-        if not (self.exptime[mask] == np.median(self.exptime[mask])).all():
-            warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((self.exptime[mask] != np.median(self.exptime[mask])).sum(), len(self.exptime[mask])))
-        mask &= self.exptime == np.median(self.exptime)
+        #if not (self.exptime[mask] == np.median(self.exptime[mask])).all():
+        #    warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((self.exptime[mask] != np.median(self.exptime[mask])).sum(), len(self.exptime[mask])))
+        #mask &= self.exptime == np.median(self.exptime)
 
         self.propid = np.asarray([hdr['PROPOSID'] for hdr in self.hdrs])
         if propid is None:
@@ -281,9 +292,9 @@ class Observation(object):
                 for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'hdrs', 'filenames']]
         mask = mask[s]
 
-        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 1)]
+        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 0.8)]
         self.nvisits = len(start_dates)
-        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 2) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
+        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 0.8) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
 
         if visit != None:
             if visit > self.nvisits:
@@ -311,16 +322,17 @@ class Observation(object):
         orbits = np.where(np.append(0, np.diff(self.time)) > 0.015)[0]
         self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)]).T
 
-        if load_only:
-            return self
+        return self
 
+    def build(self, cadence_mask=None):
+        if cadence_mask is None:
+            cadence_mask = np.ones(self.nt, bool)
         self.visits = []
         for idx in range(1, self.nvisits + 1):
             for direction, mask in zip(['f', 'b'], [self.forward, ~self.forward]):
                 if mask.sum() == 0:
                     continue
-                self.visits.append(Visit(self, idx, direction))
-        return self
+                self.visits.append(Visit(self, idx, direction, cadence_mask=cadence_mask))
 
     def _load_data(self):
         """ Helper function to load in the data """
@@ -419,12 +431,45 @@ class Observation(object):
 
 
     def fit_transit(self, sample=True):
+        t = [v.time for v in self.visits]
+        lcs = [v.average_lc for v in self.visits]
+        lcs_err = [v.average_lc_errors for v in self.visits]
+        orbits = [v.orbits for v in self.visits]
+        xs = [v.xshift for v in self.visits]
+        bkg = [v.bkg for v in self.visits]
+
+        r = fit_transit(t=t, lcs=lcs, lcs_err=lcs_err, orbits=orbits, xshift=xs, background=bkg,
+                        r=self.sys.secondaries[0].r.eval(),
+                        t0_val=self.sys.secondaries[0].t0.eval(),
+                        period_val=self.sys.secondaries[0].porb.eval(),
+                        r_star=self.sys.primary.r.eval(),
+                        m_star=self.sys.primary.m.eval(),
+                        exptime=np.median(self.exptime) / (3600 * 24),
+                        sample=sample)
         if sample:
-            self.wl_map_soln, self.trace = fit_transit(self, sample=sample)
+            self.wl_map_soln = r[0]
+            self.trace = r[1]
         else:
-            self.wl_map_soln = fit_transit(self, sample=sample)
-        self.model_lc = self.wl_map_soln['light_curve'] + 1
-        self.model_lc_no_ld = self.wl_map_soln['no_limb'] + 1
+            self.wl_map_soln = r
+
+        self.model_lc = self.wl_map_soln['light_curve']
+        self.model_lc_no_ld = self.wl_map_soln['no_limb']
+
+        model_lc = [self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])] for idx in range(len(t))]
+        for idx in range(len(t)):
+            self[idx].model_lc = self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])]
+            self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
+
+    #    break
+
+    def fit_transmission_spectrum(self, sample=True):
+        ts, ts_err, model, partial_model = fit_transmission_spectrum(self)
+        for idx, ts1, ts_err1 in zip(range(len(ts)), ts, ts_err):
+            k = self.visits[idx].spec_mean[0, 0] < 0.8
+            self.visits[idx].ts = ma.masked_array(ts1, k)
+            self.visits[idx].ts_err = ma.masked_array(ts_err1, k)
+            self.visits[idx].full_model = model[idx]
+            self.visits[idx].partial_model = partial_model[idx]
 
     @property
     def average_lc(self):
@@ -448,6 +493,21 @@ class Observation(object):
         for v in self.visits:
             v.plot_average_lc(ax=ax, labels=False)
         return fig
+
+    def plot_transit_fit(self):
+        t0 = self.sys.secondaries[0].t0.eval()
+        p = self.sys.secondaries[0].porb.eval()
+        t = np.hstack([self[idx].time for idx in range(len(self.visits))])
+        t_fold = (t - t0 + 0.5 * p) % p - 0.5 * p
+        mlc = (self.wl_map_soln['noise_model'] + (self.wl_map_soln['light_curve']** 0) * self.wl_map_soln['normalization'])
+        fig = plt.figure(figsize=(10, 4))
+        plt.scatter(t_fold, np.hstack(self.average_lc) / np.median(np.hstack(self.average_lc)), c='r', s=4, label='Raw Data')
+        plt.scatter(t_fold, np.hstack(self.average_lc) / mlc, c='k', s=7, label='Corrected Data')
+        plt.scatter(t_fold, self.wl_map_soln['light_curve'], c='lime', s=3, label='Transit Model')
+        plt.xlabel("Time")
+        plt.ylabel('Normalized Flux')
+        return fig
+        #plt.scatter(t_fold, map_soln['light_curve'] * map_soln['normalization'], s=1, c='r')
 
     def plot_resids(self):
         fig = plt.figure(figsize=(10, 10))
