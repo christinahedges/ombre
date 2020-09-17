@@ -71,7 +71,7 @@ def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.3):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         mask = np.atleast_3d(sci.mean(axis=0) > np.nanpercentile(sci, 50)).transpose([2, 0, 1])
-
+        #return mask
         data = sci/mask
         data[~np.isfinite(data)] = np.nan
 
@@ -82,8 +82,17 @@ def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.3):
         spatial = spatial > np.nanmax(spatial) * spatial_cut
 
         mask = (np.atleast_3d(np.atleast_2d(spectral) * np.atleast_2d(spatial).T)).transpose([2, 0, 1])
-    return mask, np.atleast_3d(np.atleast_2d(spectral)).transpose([2, 0, 1]), np.atleast_3d(np.atleast_2d(spatial.T)).transpose([2, 1, 0])
 
+        # Cut out the zero phase dispersion!
+        # Choose the widest block as the true dispersion...
+        secs = mask.any(axis=0).astype(int)
+        len_secs = np.diff(np.where(np.gradient(secs) != 0)[0][::2] + 1)[::2]
+        if len(len_secs) > 1:
+            a = (np.where(np.gradient(secs) != 0)[0][::2] + 1)[np.argmax(len_secs)*2:np.argmax(len_secs)*2+2]
+            b = ((np.in1d(np.arange(len(mask)), np.arange(a[0] - 20, a[1] + 20)))[:, None] * np.ones(len(mask))).T
+            mask *= b[None, :, :].astype(bool)
+
+    return mask, np.atleast_3d(np.atleast_2d(spectral)).transpose([2, 0, 1]), np.atleast_3d(np.atleast_2d(spatial.T)).transpose([2, 1, 0])
 
 def average_vsr(obs):
     avg = np.atleast_3d(np.average(obs.data, weights=1/obs.error, axis=1)).transpose([0, 2, 1])
@@ -177,14 +186,21 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
         As = []
         for tdx in range(obs.nt):
             # Note we build 2 principle components, and only take the first one.
-            A, _, _ = pca(frames[tdx], k=2, n_iter=30)
-            A = A[:, 0, None]
+            A, _, _ = pca(frames[tdx], k=np.min([obs.nsp//10, 15]), n_iter=10)
+            #A = A[:, 0, None]
 
-            A = np.hstack([np.atleast_2d(np.ones(obs.nsp)).T, A])
-            A = np.vstack([(np.atleast_2d(a).T * np.ones(frames[0].shape)).ravel() for a in A.T]).T
-            A = np.hstack([A,
-                          A * np.atleast_2d(obs.X[0].ravel()).T,
-                         ])
+            A2 = []
+            for idx in range(A.shape[1]):
+                A1 = np.hstack([np.atleast_2d(np.ones(obs.nsp)).T, A[:, idx, None]])
+                A1 = np.vstack([(np.atleast_2d(a).T * np.ones(frames[0].shape)).ravel() for a in A1.T]).T
+                A2.append(A1)
+            A = np.hstack(A2)
+#            import pdb;pdb.set_trace()
+            # Add tilt
+#            A = np.hstack([A,
+#                         A * np.atleast_2d(obs.X[0].ravel()).T,
+#                        ])
+
             As.append(A)
         As = np.asarray(As)
     else:
@@ -308,6 +324,7 @@ def fit_data(obs):
     frames[(frames_err/frames) > 0.1] = 1
 
     X, prior_mu, prior_sigma = _build_X(obs, frames, frames_err)
+
 
     sigma_f_inv = sparse.csr_matrix(1/frames_err.ravel()**2)
     sigma_w_inv = X.T.dot(X.multiply(sigma_f_inv.T)).toarray()
@@ -512,7 +529,8 @@ def build_spectrum(obs, errors=False, npoly=2):
         #import pdb;pdb.set_trace()
 
         if errors:
-            y_model_errs[:, :, idx] = (A.dot(np.linalg.solve(sigma_w_inv, A.toarray().T)).diagonal()**0.5).reshape(frame.shape)
+#            y_model_errs[:, :, idx] = (A.dot(np.linalg.solve(sigma_w_inv, A.toarray().T)).diagonal()**0.5).reshape(frame.shape)
+            y_model_errs[:, :, idx] = (A.dot(np.linalg.inv(sigma_w_inv).diagonal()**0.5)).reshape(frame.shape)
 
     if errors:
 #        y_model_errs = (y_model_errs.T / np.mean(y_model, axis=(1, 2))).T
@@ -645,14 +663,14 @@ def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_v
         # The Kipping (2013) parameterization for quadratic limb darkening paramters
         #u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
         u = pm.Uniform('u', lower=0, upper=1, testval=0.5, shape=1)
-
+        r_star_pm = pm.Normal('r_star', mu=r_star, sd=0.1*r_star)
         r = pm.Normal(
             "r", mu=r, sd=r*0.3)
-        ror = pm.Deterministic("ror", r / r_star)
+        ror = pm.Deterministic("ror", r / r_star_pm)
         b = xo.ImpactParameter("b", ror=ror)
 
         # Set up a Keplerian orbit for the planets
-        orbit = xo.orbits.KeplerianOrbit(period=period, t0=t0, r_star=r_star, m_star=m_star, b=b)
+        orbit = xo.orbits.KeplerianOrbit(period=period, t0=t0, r_star=r_star_pm, m_star=m_star, b=b)
 
         # Compute the model light curve using starry
         light_curves = xo.LimbDarkLightCurve(u).get_light_curve(
@@ -687,6 +705,8 @@ def fit_transmission_spectrum(obs):
     ts_err = []
     models = []
     partial_models = []
+    ws = []
+    sigma_ws = []
 
     for visit in obs.visits:
         if (visit.model_lc == 1).all():
@@ -705,6 +725,7 @@ def fit_transmission_spectrum(obs):
         frames_err = (frames_err.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
         frames = (frames.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
         frames[(frames_err/frames) > 0.1] = 1
+        frames[np.abs(frames - 1) > 0.3] = 1
 
         X1, prior_mu1, prior_sigma1 = _build_X(visit, frames, frames_err, transit=False)
 
@@ -718,9 +739,14 @@ def fit_transmission_spectrum(obs):
         model_lc = visit.model_lc - 1
         model_lc_no_ld = visit.model_lc_no_ld - 1
 
-        ld = model_lc - model_lc_no_ld
-        ld = ((np.ones(visit.shape).T * ld).T).ravel()
-        ld = sparse.hstack([sparse.csr_matrix(ld).T, sparse.csr_matrix(ld * visit.X.ravel()).T ], format='csr')
+#        ld = model_lc - model_lc_no_ld
+#        ld = ((np.ones(visit.shape).T * ld).T).ravel()
+#        ld = sparse.hstack([sparse.csr_matrix(ld).T, sparse.csr_matrix(ld * visit.X.ravel()).T ], format='csr')
+        A = sparse.csr_matrix((np.atleast_2d((model_lc - model_lc_no_ld).astype(float)).T * np.ones(visit.shape[:2])).ravel()).T
+        x = np.unique(visit.X)
+        ld = X_tr.multiply(0).copy()
+        for jdx in range(visit.nwav):
+            ld[visit.X.ravel() == x[jdx], A.shape[1] * jdx : A.shape[1] * (jdx + 1)] = A
 
         A = sparse.csr_matrix((np.atleast_2d((model_lc_no_ld).astype(float)).T * np.ones(visit.shape[:2])).ravel()).T
         x = np.unique(visit.X)
@@ -732,8 +758,8 @@ def fit_transmission_spectrum(obs):
 
 
         X = sparse.hstack([X1, X_tr2], format='csr')
-        prior_mu = np.hstack([prior_mu1, [1, 0], [0] * visit.nwav])
-        prior_sigma = np.hstack([prior_sigma1, [0.05, 0.05], [0.05] * visit.nwav])
+        prior_mu = np.hstack([prior_mu1, [0] * 2 * visit.nwav])
+        prior_sigma = np.hstack([prior_sigma1, [0.05] * 2 * visit.nwav])
 
         sigma_f_inv = sparse.csr_matrix(1/frames_err.ravel()**2)
         sigma_w_inv = X.T.dot(X.multiply(sigma_f_inv.T)).toarray()
@@ -742,7 +768,8 @@ def fit_transmission_spectrum(obs):
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         model = (X.dot(w)).reshape(visit.shape)
-        sigma_w = np.linalg.solve(sigma_w_inv, np.eye(w.shape[0]))
+        #sigma_w = np.linalg.solve(sigma_w_inv, np.eye(w.shape[0]))
+        sigma_w = np.linalg.inv(sigma_w_inv)
 
         ff = np.average((frames-model)[oot_transit], weights=1/frames_err[oot_transit], axis=0)
 
@@ -753,7 +780,8 @@ def fit_transmission_spectrum(obs):
         partial_model = (X1.dot(w[:X1.shape[1]])).reshape(visit.shape)
         partial_model -= np.mean(partial_model)
         partial_model += np.mean(model)
-
+        model += ff
+        partial_model += ff
 
         depth = -model_lc.min()
 
@@ -761,5 +789,7 @@ def fit_transmission_spectrum(obs):
         ts_err.append(depth * 1e6 * (np.diag(sigma_w)**0.5)[-visit.nwav:])
         models.append(model)
         partial_models.append(partial_model)
+        ws.append(w)
+        sigma_ws.append(np.diag(sigma_w)**0.5)
 
-    return ts, ts_err, models, partial_models
+    return ts, ts_err, models, partial_models, ws, sigma_ws

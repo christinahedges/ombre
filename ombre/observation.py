@@ -47,11 +47,13 @@ class Visit(object):
         if not (observation.exptime[s] == np.median(observation.exptime[s])).all():
            warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((observation.exptime[s] != np.median(observation.exptime[s])).sum(), len(observation.exptime[s])))
 
-        s &= observation.exptime == np.median(observation.exptime)
+        s &= observation.exptime == np.median(observation.exptime[s])
         self.cadence_mask = s
         orbits = observation.orbits[s]
         self.orbits = orbits[:, np.any(orbits, axis=0)]
 
+        if s.sum() == 0:
+            raise ValueError('No valid cadences remaining.')
         [setattr(self, key, getattr(observation, key)[s])
             for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
                         'hdrs', 'postarg1', 'postarg2',
@@ -150,7 +152,7 @@ class Visit(object):
         r = (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
         return r
 
-    def plot_average_lc(self, ax=None, errors=False, labels=True):
+    def plot_average_lc(self, ax=None, errors=False, labels=True, model_lc=True):
         if ax is None:
             fig, ax1 = plt.subplots()
         else:
@@ -175,7 +177,7 @@ class Visit(object):
             ax1.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
         ax1.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
         t = np.linspace(self.time[0], self.time[-1], 1000)
-        if hasattr(self, 'model_lc'):
+        if hasattr(self, 'model_lc') & model_lc:
             ax1.scatter(self.time, self.model_lc)
         if labels:
             ax1.legend()
@@ -332,7 +334,10 @@ class Observation(object):
             for direction, mask in zip(['f', 'b'], [self.forward, ~self.forward]):
                 if mask.sum() == 0:
                     continue
-                self.visits.append(Visit(self, idx, direction, cadence_mask=cadence_mask))
+                try:
+                    self.visits.append(Visit(self, idx, direction, cadence_mask=cadence_mask))
+                except ValueError:
+                    continue
 
     def _load_data(self):
         """ Helper function to load in the data """
@@ -463,13 +468,15 @@ class Observation(object):
     #    break
 
     def fit_transmission_spectrum(self, sample=True):
-        ts, ts_err, model, partial_model = fit_transmission_spectrum(self)
+        ts, ts_err, model, partial_model, w, sigma_w = fit_transmission_spectrum(self)
         for idx, ts1, ts_err1 in zip(range(len(ts)), ts, ts_err):
             k = self.visits[idx].spec_mean[0, 0] < 0.8
             self.visits[idx].ts = ma.masked_array(ts1, k)
             self.visits[idx].ts_err = ma.masked_array(ts_err1, k)
             self.visits[idx].full_model = model[idx]
             self.visits[idx].partial_model = partial_model[idx]
+            self.visits[idx].w = w[idx]
+            self.visits[idx].sigma_w = sigma_w[idx]
 
     @property
     def average_lc(self):
@@ -488,11 +495,14 @@ class Observation(object):
         return [v.raw_channel_lcs for v in self.visits]
 
 
-    def plot_average_lc(self):
-        fig, ax = plt.subplots()
+    def plot_average_lc(self, ax=None):
+        if ax is None:
+            fig, ax = plt.subplots()
         for v in self.visits:
             v.plot_average_lc(ax=ax, labels=False)
-        return fig
+        if ax is None:
+            return fig
+        return
 
     def plot_transit_fit(self):
         t0 = self.sys.secondaries[0].t0.eval()
@@ -513,7 +523,7 @@ class Observation(object):
         fig = plt.figure(figsize=(10, 10))
         ax = plt.subplot2grid((5, 1), (0, 0))
 
-        self.plot_average_lc(ax=ax)
+        self.plot_average_lc(ax=ax, model_lc=False)
         ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='')
 
         ax = plt.subplot2grid((5, 1), (1, 0), rowspan=4)
