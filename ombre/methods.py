@@ -177,47 +177,14 @@ def calibrate(obs, teff, kdx=0):
     return sensitivity, wavelength
 
 
-def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offset=True, vsr=True, bkg=True, npoly=3):
+def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offset=True, bkg=True, npoly=3):
     """ Build a design matrix for all the data in three dimensions. """
 
-    # Build VSR model
-    # Find principle component in spatial dimension
-    if vsr:
-        As = []
-        for tdx in range(obs.nt):
-            # Note we build 2 principle components, and only take the first one.
-            A, _, _ = pca(frames[tdx], k=np.min([obs.nsp//10, 15]), n_iter=10)
-            #A = A[:, 0, None]
-
-            A2 = []
-            for idx in range(A.shape[1]):
-                A1 = np.hstack([np.atleast_2d(np.ones(obs.nsp)).T, A[:, idx, None]])
-                A1 = np.vstack([(np.atleast_2d(a).T * np.ones(frames[0].shape)).ravel() for a in A1.T]).T
-                A2.append(A1)
-            A = np.hstack(A2)
-#            import pdb;pdb.set_trace()
-            # Add tilt
-#            A = np.hstack([A,
-#                         A * np.atleast_2d(obs.X[0].ravel()).T,
-#                        ])
-
-            As.append(A)
-        As = np.asarray(As)
-    else:
-        As = np.ones((obs.nt, obs.nwav*obs.nsp, 1))
-    X1 = sparse.lil_matrix((np.product(obs.shape), (As.shape[2] * obs.nt)))
-    for tdx in range(obs.nt):
-        X1[tdx * obs.nsp * obs.nwav : (tdx + 1) * obs.nsp * obs.nwav, tdx * As.shape[2] : (tdx + 1) * As.shape[2]] = As[tdx]
-
-    prior_mu = [0] * As.shape[2]
-    prior_sigma = [0.05] * As.shape[2]
-    prior_mu = np.hstack(prior_mu * obs.nt).astype(float)
-    prior_sigma = np.hstack(prior_sigma * obs.nt).astype(float)
-
-    X = X1
+    X = sparse.csr_matrix(np.ones(np.product(frames.shape))).T
+    prior_mu = np.asarray([0])
+    prior_sigma = np.asarray([0.05])
 
     if spectrum:
-
         # Build spectral dimension
         def _make_A(obs, npoly):
 
@@ -708,7 +675,7 @@ def fit_transmission_spectrum(obs):
     ws = []
     sigma_ws = []
 
-    for visit in obs.visits:
+    for visit in tqdm(obs.visits):
         if (visit.model_lc == 1).all():
             ts.append(None)
             ts_err.append(None)
@@ -718,21 +685,27 @@ def fit_transmission_spectrum(obs):
         in_transit = (visit.model_lc < visit.model_lc.min() + (1 - visit.model_lc.min()) * 0.2)
         oot_transit = (visit.model_lc == 1)
         wlc = visit.average_lc
-        m = (visit.spec_mean * visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
-        frames = visit.data / m
-        frames_err = visit.error  / m
+        # m = (visit.spec_mean * visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
+        # frames = visit.data / m
+        # frames_err = visit.error  / m
+        #
 
-        frames_err = (frames_err.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
-        frames = (frames.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
-        frames[(frames_err/frames) > 0.1] = 1
-        frames[np.abs(frames - 1) > 0.3] = 1
+        # frames_err = (frames_err.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
+        # frames = (frames.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
+        # frames[(frames_err/frames) > 0.1] = 1
+        # frames[np.abs(frames - 1) > 0.3] = 1
 
-        X1, prior_mu1, prior_sigma1 = _build_X(visit, frames, frames_err, transit=False)
-
-        m = (visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
+        m = ((visit.vsr_mean + (visit.vsr_grad - 1))* np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
 
         frames = visit.data / m
         frames_err = visit.error / m
+
+        X1, prior_mu1, prior_sigma1 = _build_X(visit, frames, frames_err, transit=False)
+
+#        m = (visit.vsr_mean + visit.vsr_grad) * np.atleast_3d(wlc).transpose([1, 0, 2])).data
+
+#        frames = visit.data / m
+#        frames_err = visit.error / m
 
         X_tr = sparse.lil_matrix((np.product(visit.shape), (visit.nwav)))
 
@@ -793,3 +766,45 @@ def fit_transmission_spectrum(obs):
         sigma_ws.append(np.diag(sigma_w)**0.5)
 
     return ts, ts_err, models, partial_models, ws, sigma_ws
+
+
+def fit_vsr_slant(visit):
+    wlc = visit.average_lc
+    m = (visit.spec_mean * visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
+    frames = visit.data / m
+    frames_err = visit.error  / m
+
+    frames_err = (frames_err.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
+    frames = (frames.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
+    frames[(frames_err/frames) > 0.1] = 1
+    frames[np.abs(frames - 1) > 0.3] = 1
+
+    vsr_grad = np.ones_like(frames)
+    k = (np.abs(visit.Y[0]) < -visit.Y[0][2][0]).ravel()
+    k &= (np.abs(visit.X[0]) < -visit.X[0][0][3]).ravel()
+
+    As = []
+    for tdx in (range(visit.nt)):
+        A = np.hstack([np.gradient(visit.vsr_mean[tdx])[0].ravel()[:, None],
+                       np.gradient(np.gradient(visit.vsr_mean[tdx])[0])[0].ravel()[:, None],
+                       np.gradient(np.gradient(np.gradient(visit.vsr_mean[tdx])[0])[0])[0].ravel()[:, None],
+                       visit.X[tdx].ravel()[:, None]])
+        A = np.hstack([A,
+                       (A[:, 0] * A[:, 3])[:, None], (A[:, 1] * A[:, 3])[:, None], (A[:, 2] * A[:, 3])[:, None],
+                       np.ones(A.shape[0])[:, None]])
+
+        As.append(A)
+        sigma_w_inv = A[k].T.dot(A[k]/frames_err[tdx].ravel()[k, None]**2)
+        B = A[k].T.dot(((frames[tdx])/frames_err[tdx]**2).ravel()[k])
+        w = np.linalg.solve(sigma_w_inv, B)
+        vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:])
+
+    ff = np.median(frames - vsr_grad, axis=0)
+    for tdx in (range(visit.nt)):
+        A = As[tdx]
+        sigma_w_inv = A[k].T.dot(A[k]/frames_err[tdx].ravel()[k, None]**2)
+        B = A[k].T.dot(((frames[tdx] - 1)/frames_err[tdx]**2).ravel()[k])
+        w = np.linalg.solve(sigma_w_inv, B)
+        vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:]) + 1
+
+    return vsr_grad

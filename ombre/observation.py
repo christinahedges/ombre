@@ -19,7 +19,7 @@ from astropy.convolution import convolve, Box2DKernel
 
 from astroquery.mast import Observations as astropyObs
 
-from .methods import simple_mask, average_vsr, average_spectrum, get_flatfield, calibrate, build_vsr, build_spectrum, fit_data, fit_transit, fit_transmission_spectrum
+from .methods import *
 
 from starry.extensions import from_nexsci
 
@@ -84,11 +84,17 @@ class Visit(object):
                 self.flat = get_flatfield(observation, self, self.model)
 
         self.error[self.error/self.data > 0.1] = 1e10
-        res = (self.data / self.model)
-        res = ((res.T) - np.mean(res, axis=(1, 2))).T
-        self.cosmic_rays = sigma_clip(res, sigma=8, axis=0).mask
-        self.error += self.cosmic_rays * 1e10
+#        res = (self.data / self.model)
+#        res = ((res.T) - np.mean(res, axis=(1, 2))).T
+#        self.cosmic_rays = sigma_clip(res, sigma=8, axis=0).mask
+        m = (self.spec_mean * self.vsr_mean * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        med = np.median(self.data - m, axis=0)[None, :, :]
+        m += med
+        cmr = sigma_clip(self.data - m, axis=0, sigma_upper=5, sigma_lower=0).mask
+        cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
+        self.cosmic_rays = cmr
 
+        self.error += self.cosmic_rays * 1e10
 
         w = np.ones(observation.sci[s].shape)
         w[observation.err[s]/observation.sci[s] > 0.1] = 1e10
@@ -122,6 +128,8 @@ class Visit(object):
         self.Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.data.shape)
 
         self.sensitivity, self.wavelength = calibrate(self, self.teff)
+
+        self.vsr_grad = fit_vsr_slant(self)
 
     def __repr__(self):
         return '{} Visit {}, {} [Proposal ID: {}]'.format(self.name, self.visit_number, self.direction, self.propid)
@@ -409,8 +417,17 @@ class Observation(object):
 
         if isinstance(visit, int):
 #            start_time = np.asarray([Time(datetime.strptime('{}'.format(fits.open(fname)[0].header['DATE-OBS']), '%Y-%m-%d')).jd for fname in paths])
-            start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 1)]
-            visits = np.asarray([np.where(np.sort(np.unique(start_date)) == t1)[0][0] + 1 for t1 in start_dates])
+            hdrs = np.asarray([fits.getheader(file) for idx, file in enumerate(paths)])
+
+            convert_time = lambda hdr:(Time(datetime.strptime('{}-{}'.format(hdr['DATE-OBS'],
+                                                                  hdr['TIME-OBS']), '%Y-%m-%d-%H:%M:%S')).jd,
+    								   Time(datetime.strptime('{}'.format(hdr['DATE-OBS']), '%Y-%m-%d')).jd)
+
+
+            time, start_date = np.asarray([convert_time(hdr) for hdr in hdrs]).T
+
+#            start_dates = np.unique(start_date)[np.append(True, np.diff(np.unique(start_date)) > 1)]
+            visits = np.unique(start_date, return_inverse=True)[1] + 1
             mask = visits == visit
             if not mask.any():
                 raise ValueError('No data in visit {}'.format(visit))
