@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 import os
 import logging
 from scipy import sparse
+import pickle
 
 from astropy.io import fits
 from astropy.time import Time
@@ -160,6 +161,50 @@ class Visit(object):
         r = (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
         return r
 
+    def animate_residuals(self, output=None):
+        m = ((self.vsr_mean + (self.vsr_grad - 1))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        res = (self.data / m - self.partial_model)
+        k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+
+        vmin, vmax = np.percentile(res, [3, 97])
+        if output is None:
+            output = f'{self.name}_resids.mp4'
+        animate((res/k), vmin=-0.01, vmax=0.01, cmap='coolwarm', output=output)
+
+
+    def plot_channel_lcs(self):
+        m = ((self.vsr_mean + (self.vsr_grad - 1))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        res = (self.data / m - self.partial_model)
+        k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+
+        a = (np.sum(res * k, axis=1)/np.sum(k, axis=1)).T
+        vmin, vmax = np.percentile(a, [3, 97])
+
+        fig = plt.figure(figsize=(10, 10))
+        ax = plt.subplot2grid((5, 1), (0, 0))
+
+        self.plot_average_lc(ax=ax, model_lc=False)
+        ax.set(title=f'{self.__repr__()}', xlabel='')
+
+        ax = plt.subplot2grid((5, 1), (1, 0), rowspan=4)
+        dt = np.median(np.diff(self.time))
+        masks = [np.in1d(np.arange(self.nt), m)
+                    for m in np.array_split(np.arange(self.nt), np.where(np.append(0, np.diff(self.time)) > dt*1.5)[0])]
+        for m in masks:
+            plt.pcolormesh(self.time[m], self.wavelength, a[:, m], vmin=vmin, vmax=vmax, cmap='PRGn')
+
+        bad = np.where(np.gradient(self.ts.mask.astype(float)) != 0)[0][::2]
+        plt.fill_between(self.time, self.wavelength[0], self.wavelength[bad[0]], color='k', alpha=0.3)
+        plt.fill_between(self.time, self.wavelength[bad[-1]], self.wavelength[-1], color='k', alpha=0.3)
+
+        cbar = plt.colorbar(orientation='horizontal')
+        cbar.set_label('$\delta$ Transit Depth')
+        ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='Time [BKJD]', ylabel='Wavelength [A]')
+
+        return fig
+
+
+
     def plot_average_lc(self, ax=None, errors=False, labels=True, model_lc=True):
         if ax is None:
             fig, ax1 = plt.subplots()
@@ -302,9 +347,13 @@ class Observation(object):
                 for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'hdrs', 'filenames']]
         mask = mask[s]
 
-        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 0.8)]
-        self.nvisits = len(start_dates)
-        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 0.8) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
+#        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 0.8)]
+#        self.nvisits = len(start_dates)
+#        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 0.8) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
+
+        split = np.where(np.diff(self.time) > 0.8)[0] + 1
+        self.nvisits = len(split) + 1
+        self.visit_number = np.hstack([np.ones(len(s), int) * (idx + 1) for idx, s in enumerate(np.array_split(self.time, split))])
 
         if visit != None:
             if visit > self.nvisits:
@@ -495,6 +544,34 @@ class Observation(object):
             self.visits[idx].w = w[idx]
             self.visits[idx].sigma_w = sigma_w[idx]
 
+        visits_numbers = [v.visit_number for v in self]
+
+        wavelength, transmission_spec, transmission_spec_err = [], [], []
+        for vn in np.unique(visits_numbers):
+            vloc = np.where(visits_numbers == vn)[0]
+            if len(vloc) == 2:
+                w, ts, tse = [], [], []
+                for vdx in vloc:
+                    if self.visits[vdx].ts is None:
+                        continue
+                    w.append(self.visits[vdx].wavelength)
+                    ts.append(self.visits[vdx].ts)
+                    tse.append(self.visits[vdx].ts_err)
+
+                w, ts, tse = np.vstack(w).mean(axis=0), np.ma.mean(ts, axis=0), np.ma.hypot(*np.vstack(tse))
+            if len(vloc) == 1:
+                if self.visits[vloc[0]].ts is None:
+                    continue
+                w = self.visits[vloc[0]].wavelength
+                ts = self.visits[vloc[0]].ts
+                tse = self.visits[vloc[0]].ts_err
+            wavelength.append(w)
+            transmission_spec.append(ts)
+            transmission_spec_err.append(tse)
+        self.wavelength = wavelength
+        self.transmission_spec = transmission_spec
+        self.transmission_spec_err = transmission_spec_err
+
     @property
     def average_lc(self):
         return [v.average_lc for v in self.visits]
@@ -533,103 +610,127 @@ class Observation(object):
         plt.scatter(t_fold, self.wl_map_soln['light_curve'], c='lime', s=3, label='Transit Model')
         plt.xlabel("Time")
         plt.ylabel('Normalized Flux')
+        plt.legend()
+        plt.title(f'{self.name}')
         return fig
         #plt.scatter(t_fold, map_soln['light_curve'] * map_soln['normalization'], s=1, c='r')
+    #
+    # def plot_resids(self):
+    #     fig = plt.figure(figsize=(10, 10))
+    #     ax = plt.subplot2grid((5, 1), (0, 0))
+    #
+    #     self.plot_average_lc(ax=ax, model_lc=False)
+    #     ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='')
+    #
+    #     ax = plt.subplot2grid((5, 1), (1, 0), rowspan=4)
+    #
+    #
+    #     ts = self.channel_lcs
+    #     ts = (ts.T/np.mean(ts, axis=1))
+    #
+    #     vmin, vmax = np.percentile(ts, [5, 95])
+    #
+    #     dt = np.median(np.diff(self.time))
+    #     masks = [np.in1d(np.arange(self.nt), m)
+    #                 for m in np.array_split(np.arange(self.nt), np.where(np.append(0, np.diff(self.time)) > dt*1.5)[0])]
+    #     for m in masks:
+    #         plt.pcolormesh(self.time[m], self.wavelength, ts[:, m], vmin=vmin, vmax=vmax, cmap='PRGn')
+    #     cbar = plt.colorbar(orientation='horizontal')
+    #     cbar.set_label('$\delta$ Transit Depth')
+    #     ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='Time [BKJD]', ylabel='Wavelength [A]')
+    #     return fig
 
-    def plot_resids(self):
-        fig = plt.figure(figsize=(10, 10))
-        ax = plt.subplot2grid((5, 1), (0, 0))
+    #
+    # def plot_transmission_spectrum(self, offset=0.0005):
+    #     fig = plt.figure(figsize=(10, 10))
+    #
+    #     a = self.oot_transit & (self.time < self.time[self.in_transit].mean())
+    #     b = self.oot_transit & (self.time >= self.time[self.in_transit].mean())
+    #
+    #     ts = self.channel_lcs
+    #     ts = (ts.T/np.mean(ts, axis=1))
+    #
+    #     err = ts.T[~self.in_transit].std(axis=0).data
+    #     err /= (~self.in_transit).sum()**0.5
+    #
+    #     for idx, mask, col, label in zip([0, -1, 1], [self.in_transit, a, b], ['r', 'k', 'k'], ['In Transit', 'Before Transit', 'Out of Transit']):
+    #         y = np.average(ts[:, mask], axis=1)
+    #         plt.errorbar(self.wavelength, 1 - y/np.median(y) + idx * offset, err, c=col)
+    #         if idx == 0:
+    #             transmission_spectrum = 1 - y/np.median(y)
+    #             transmission_spectrum_err = err
+    #
+    #     plt.xlabel('Wavelength [A]')
+    #     plt.ylabel('$\delta$')
+    #
+    #     return fig, transmission_spectrum, transmission_spectrum_err
+    #
+    # def plot_channel_lcs(self, offset=0.01, lines=True, residuals=False, **kwargs):
+    #     c = np.nanmedian(self.channel_lcs) *  np.ones(self.nt)
+    #     cmap = kwargs.pop('cmap', plt.get_cmap('coolwarm'))
+    #     fig, ax = plt.subplots(1, 2, figsize=(15, 25), sharey=True)
+    #     wl = self.average_lc.data
+    #     rc = self.raw_channel_lcs
+    #     rc /= np.median(rc)
+    #     cc = self.channel_lcs.data
+    #     cc /= np.median(cc)
+    #
+    #     if residuals:
+    #         [ax[0].scatter(self.time, rc[:, kdx] + kdx * offset - wl,
+    #                     c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+    #                     vmin=self.wavelength[0], vmax=self.wavelength[-1],
+    #                     cmap=cmap)
+    #                         for kdx in range(len(self.wavelength))];
+    #
+    #         [ax[1].scatter(self.time, cc[:, kdx] + kdx * offset - wl,
+    #                     c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+    #                      vmin=self.wavelength[0], vmax=self.wavelength[-1],
+    #                      cmap=cmap)
+    #                         for kdx in range(len(self.wavelength))];
+    #         if lines:
+    #             [ax[1].plot(self.time, np.ones(self.nt) * kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(cc[:, kdx]) != 0)];
+    #
+    #     else:
+    #         [ax[0].scatter(self.time, rc[:, kdx] + kdx * offset,
+    #                     c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+    #                     vmin=self.wavelength[0], vmax=self.wavelength[-1],
+    #                     cmap=cmap)
+    #                         for kdx in range(len(self.wavelength))];
+    #
+    #         [ax[1].scatter(self.time, cc[:, kdx] + kdx * offset,
+    #                     c=np.ones(self.nt) * self.wavelength[kdx], s=1,
+    #                      vmin=self.wavelength[0], vmax=self.wavelength[-1],
+    #                      cmap=cmap)
+    #                         for kdx in range(len(self.wavelength))];
+    #         if lines:
+    #             [ax[1].plot(self.time, c + kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(cc[:, kdx]) != 0)];
+    #     ax[1].set(xlabel='Time', ylabel='Flux', title='Corrected', yticklabels='')
+    #     ax[0].set(xlabel='Time', ylabel='Flux', title='Raw', yticklabels='')
+    #     plt.subplots_adjust(wspace=0.)
+    #     return fig
 
-        self.plot_average_lc(ax=ax, model_lc=False)
-        ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='')
+    def write(self, output=None):
 
-        ax = plt.subplot2grid((5, 1), (1, 0), rowspan=4)
+        #        break
 
-
-        ts = self.channel_lcs
-        ts = (ts.T/np.mean(ts, axis=1))
-
-        vmin, vmax = np.percentile(ts, [5, 95])
-
-        dt = np.median(np.diff(self.time))
-        masks = [np.in1d(np.arange(self.nt), m)
-                    for m in np.array_split(np.arange(self.nt), np.where(np.append(0, np.diff(self.time)) > dt*1.5)[0])]
-        for m in masks:
-            plt.pcolormesh(self.time[m], self.wavelength, ts[:, m], vmin=vmin, vmax=vmax, cmap='PRGn')
-        cbar = plt.colorbar(orientation='horizontal')
-        cbar.set_label('$\delta$ Transit Depth')
-        ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='Time [BKJD]', ylabel='Wavelength [A]')
-        return fig
-
-
-    def plot_transmission_spectrum(self, offset=0.0005):
-        fig = plt.figure(figsize=(10, 10))
-
-        a = self.oot_transit & (self.time < self.time[self.in_transit].mean())
-        b = self.oot_transit & (self.time >= self.time[self.in_transit].mean())
-
-        ts = self.channel_lcs
-        ts = (ts.T/np.mean(ts, axis=1))
-
-        err = ts.T[~self.in_transit].std(axis=0).data
-        err /= (~self.in_transit).sum()**0.5
-
-        for idx, mask, col, label in zip([0, -1, 1], [self.in_transit, a, b], ['r', 'k', 'k'], ['In Transit', 'Before Transit', 'Out of Transit']):
-            y = np.average(ts[:, mask], axis=1)
-            plt.errorbar(self.wavelength, 1 - y/np.median(y) + idx * offset, err, c=col)
-            if idx == 0:
-                transmission_spectrum = 1 - y/np.median(y)
-                transmission_spectrum_err = err
-
-        plt.xlabel('Wavelength [A]')
-        plt.ylabel('$\delta$')
-
-        return fig, transmission_spectrum, transmission_spectrum_err
-
-    def plot_channel_lcs(self, offset=0.01, lines=True, residuals=False, **kwargs):
-        c = np.nanmedian(self.channel_lcs) *  np.ones(self.nt)
-        cmap = kwargs.pop('cmap', plt.get_cmap('coolwarm'))
-        fig, ax = plt.subplots(1, 2, figsize=(15, 25), sharey=True)
-        wl = self.average_lc.data
-        rc = self.raw_channel_lcs
-        rc /= np.median(rc)
-        cc = self.channel_lcs.data
-        cc /= np.median(cc)
-
-        if residuals:
-            [ax[0].scatter(self.time, rc[:, kdx] + kdx * offset - wl,
-                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
-                        vmin=self.wavelength[0], vmax=self.wavelength[-1],
-                        cmap=cmap)
-                            for kdx in range(len(self.wavelength))];
-
-            [ax[1].scatter(self.time, cc[:, kdx] + kdx * offset - wl,
-                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
-                         vmin=self.wavelength[0], vmax=self.wavelength[-1],
-                         cmap=cmap)
-                            for kdx in range(len(self.wavelength))];
-            if lines:
-                [ax[1].plot(self.time, np.ones(self.nt) * kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(cc[:, kdx]) != 0)];
-
-        else:
-            [ax[0].scatter(self.time, rc[:, kdx] + kdx * offset,
-                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
-                        vmin=self.wavelength[0], vmax=self.wavelength[-1],
-                        cmap=cmap)
-                            for kdx in range(len(self.wavelength))];
-
-            [ax[1].scatter(self.time, cc[:, kdx] + kdx * offset,
-                        c=np.ones(self.nt) * self.wavelength[kdx], s=1,
-                         vmin=self.wavelength[0], vmax=self.wavelength[-1],
-                         cmap=cmap)
-                            for kdx in range(len(self.wavelength))];
-            if lines:
-                [ax[1].plot(self.time, c + kdx * offset, c='grey', ls='--', lw=0.5, zorder=-10) for kdx in range(len(self.wavelength)) if (np.nansum(cc[:, kdx]) != 0)];
-        ax[1].set(xlabel='Time', ylabel='Flux', title='Corrected', yticklabels='')
-        ax[0].set(xlabel='Time', ylabel='Flux', title='Raw', yticklabels='')
-        plt.subplots_adjust(wspace=0.)
-        return fig
+        r = {'name':self.name,
+             'time':self.time,
+             'flux':np.hstack(self.average_lc),
+             'flux_err':np.hstack(self.average_lc_errors),
+             'raw_flux':np.hstack(self.raw_average_lc),
+             'raw_flux_err':np.hstack(self.raw_average_lc),
+             'model_lc': self.model_lc,
+             'model_lc_no_ld':self.model_lc_no_ld,
+             'wavelength':self.wavelength,
+             'transmission_spectrum':self.transmission_spec,
+             'transmission_spectrum_err':self.transmission_spec_err,
+             'yshift':np.hstack([v.yshift for v in self]),
+             'xshift':np.hstack([v.xshift for v in self]),
+             'wl_map_soln':self.wl_map_soln}
+        if output is None:
+            output = f'{self.name}_output.p'
+        pickle.dump(r, open(output, 'wb'))
 
 
-    def correct(self):
-        self.model = fit_data(self)
+    # def correct(self):
+    #     self.model = fit_data(self)

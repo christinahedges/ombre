@@ -67,7 +67,7 @@ def animate(data, scale='linear', output='out.mp4', **kwargs):
     anim.save(output, dpi=150)
 
 
-def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.3):
+def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.2):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         mask = np.atleast_3d(sci.mean(axis=0) > np.nanpercentile(sci, 50)).transpose([2, 0, 1])
@@ -695,7 +695,7 @@ def fit_transmission_spectrum(obs):
         # frames[(frames_err/frames) > 0.1] = 1
         # frames[np.abs(frames - 1) > 0.3] = 1
 
-        m = ((visit.vsr_mean + (visit.vsr_grad - 1))* np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
+        m = ((visit.vsr_mean + visit.vsr_grad - 1) * np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
 
         frames = visit.data / m
         frames_err = visit.error / m
