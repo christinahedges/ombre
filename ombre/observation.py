@@ -91,7 +91,7 @@ class Visit(object):
         m = (self.spec_mean * self.vsr_mean * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         med = np.median(self.data - m, axis=0)[None, :, :]
         m += med
-        cmr = sigma_clip(self.data - m, axis=0, sigma_upper=5, sigma_lower=0).mask
+        cmr = sigma_clip(self.data - m, axis=0, sigma_upper=6, sigma_lower=0).mask
         cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
         self.cosmic_rays = cmr
 
@@ -162,18 +162,18 @@ class Visit(object):
         return r
 
     def animate_residuals(self, output=None):
-        m = ((self.vsr_mean + (self.vsr_grad - 1))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         res = (self.data / m - self.partial_model)
         k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
 
         vmin, vmax = np.percentile(res, [3, 97])
         if output is None:
             output = f'{self.name}_resids.mp4'
-        animate((res/k), vmin=-0.01, vmax=0.01, cmap='coolwarm', output=output)
+        animate((res/k), vmin=vmin, vmax=vmax, cmap='coolwarm', output=output)
 
 
     def plot_channel_lcs(self):
-        m = ((self.vsr_mean + (self.vsr_grad - 1))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         res = (self.data / m - self.partial_model)
         k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
 

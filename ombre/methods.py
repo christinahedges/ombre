@@ -180,9 +180,28 @@ def calibrate(obs, teff, kdx=0):
 def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offset=True, bkg=True, npoly=3):
     """ Build a design matrix for all the data in three dimensions. """
 
-    X = sparse.csr_matrix(np.ones(np.product(frames.shape))).T
-    prior_mu = np.asarray([0])
-    prior_sigma = np.asarray([0.05])
+    As = []
+    for tdx in (range(obs.nt)):
+
+        A = np.hstack([(obs.X[tdx]).ravel()[:, None],
+                       (obs.Y[tdx]).ravel()[:, None],
+                       (obs.X[tdx] * obs.Y[tdx]).ravel()[:, None],
+                       (obs.X[tdx] * obs.Y[tdx]).ravel()[:, None]**2,
+                       (obs.X[tdx]**0).ravel()[:, None]])
+        As.append(A)
+    As = np.asarray(As)
+    X = sparse.lil_matrix((np.product(obs.shape), (As.shape[2] * obs.nt)))
+    for tdx in range(obs.nt):
+        X[tdx * obs.nsp * obs.nwav : (tdx + 1) * obs.nsp * obs.nwav, tdx * As.shape[2] : (tdx + 1) * As.shape[2]] = As[tdx]
+
+    prior_mu = [0] * A.shape[1]
+    prior_sigma = [0.1] * A.shape[1]
+    prior_mu = np.hstack(prior_mu * obs.nt).astype(float)
+    prior_sigma = np.hstack(prior_sigma * obs.nt).astype(float)
+
+    # X = sparse.csr_matrix(np.ones(np.product(frames.shape))).T
+    # prior_mu = np.asarray([0])
+    # prior_sigma = np.asarray([0.05])
 
     if spectrum:
         # Build spectral dimension
@@ -273,82 +292,6 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
        X = sparse.hstack([X, X3], format='csr')
 
     return X, prior_mu, prior_sigma
-
-
-def fit_data(obs):
-
-    d = ma.masked_array(obs.data, mask=(obs.error/obs.data > 0.1))
-    e = ma.masked_array(obs.error, mask=(obs.error/obs.data > 0.1))
-
-    wlc = np.average(d, weights=1/e, axis=(1, 2))
-    m = (obs.spec_mean * obs.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
-
-    frames = obs.data / m
-    frames_err = obs.error  / m
-
-    frames_err = (frames_err.T/np.average(frames, weights=1/obs.error, axis=(1, 2))).T
-    frames = (frames.T/np.average(frames, weights=1/obs.error, axis=(1, 2))).T
-    frames[(frames_err/frames) > 0.1] = 1
-
-    X, prior_mu, prior_sigma = _build_X(obs, frames, frames_err)
-
-
-    sigma_f_inv = sparse.csr_matrix(1/frames_err.ravel()**2)
-    sigma_w_inv = X.T.dot(X.multiply(sigma_f_inv.T)).toarray()
-    sigma_w_inv += np.diag(1. / prior_sigma**2)
-    B = X.T.dot((frames/frames_err**2).ravel())
-    B += (prior_mu / prior_sigma**2)
-    w = np.linalg.solve(sigma_w_inv, B)
-#    model1 = X.dot(w).reshape(frames.shape)
-
-#    import pdb;pdb.set_trace()
-    model = X[:, :-obs.nwav].dot(w[:-obs.nwav]).reshape(frames.shape)
-
-#    import pdb;pdb.set_trace()
-
-    m = obs.spec_mean * obs.vsr_mean * model
-
-    d = ma.masked_array(obs.data/m, mask=(obs.error/obs.data > 0.1))
-    e = ma.masked_array(obs.error/m, mask=(obs.error/obs.data > 0.1))
-
-    ff = np.average(d, weights=1/e, axis=0)/np.average(d, weights=1/e)
-    ff.data[ff.mask] = 1
-
-    m *= ff.data
-
-    d = ma.masked_array(obs.data/m, mask=(obs.error/obs.data > 0.1))
-    e = ma.masked_array(obs.error/m, mask=(obs.error/obs.data > 0.1))
-
-    stats = sigma_clipped_stats(d, sigma=5)
-    cmr = ((obs.data/m - stats[1]) > stats[2]*5)
-
-    d = ma.masked_array(obs.data/m, mask=(obs.error/obs.data > 0.1) | cmr)
-    e = ma.masked_array(obs.error/m, mask=(obs.error/obs.data > 0.1) | cmr)
-
-
-    d /= (np.atleast_3d(np.average(d, weights=1/e, axis=(1, 2)))).transpose([1, 0, 2])
-
-    br = d.std(axis=(0, 2))
-    stats = sigma_clipped_stats(br, sigma=5)
-    b = (br - stats[1]) > stats[2]*5
-    bad_rows = (np.atleast_3d(b.data) * np.ones(obs.shape)).astype(bool)
-
-    for idx in range(obs.nt):
-        sigma = np.std(d[idx], axis=1)
-        stats = sigma_clipped_stats(sigma, sigma=5)
-        bad_rows[idx][(sigma - stats[1]) > stats[2] * 5] |= True
-
-    corr = np.zeros(obs.shape)
-    for tdx in range(obs.nt):
-        corr[tdx] = np.atleast_2d([np.nan if d[tdx][idx].mask.all() else np.log10(pearsonr(obs.X[tdx][idx][7:-7], d[tdx][idx][7:-7])[1]) for idx in range(obs.nsp)]).T
-    bad_rows |= corr < -3
-
-    edge = np.atleast_3d(obs.vsr_mean.mean(axis=0)).transpose([2, 0, 1]) * np.ones(obs.shape) < 0.98
-
-    model = ma.masked_array(m, mask=(obs.error/obs.data > 0.1) | cmr | bad_rows | edge)
-    model = (model.T/model.mean(axis=(1, 2))).T
-
-    return model
 
 def build_vsr(obs, errors=False):
     """ Build a full model of the vsr
@@ -695,7 +638,7 @@ def fit_transmission_spectrum(obs):
         # frames[(frames_err/frames) > 0.1] = 1
         # frames[np.abs(frames - 1) > 0.3] = 1
 
-        m = ((visit.vsr_mean + visit.vsr_grad - 1) * np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
+        m = ((visit.vsr_mean + visit.vsr_grad) * np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
 
         frames = visit.data / m
         frames_err = visit.error / m
@@ -734,10 +677,12 @@ def fit_transmission_spectrum(obs):
         prior_mu = np.hstack([prior_mu1, [0] * 2 * visit.nwav])
         prior_sigma = np.hstack([prior_sigma1, [0.05] * 2 * visit.nwav])
 
+        k = (np.abs(visit.Y) < -visit.Y[0][2][0]).ravel()
+
         sigma_f_inv = sparse.csr_matrix(1/frames_err.ravel()**2)
-        sigma_w_inv = X.T.dot(X.multiply(sigma_f_inv.T)).toarray()
+        sigma_w_inv = X[k].T.dot(X[k].multiply(sigma_f_inv[:, k].T)).toarray()
         sigma_w_inv += np.diag(1. / prior_sigma**2)
-        B = X.T.dot((frames/frames_err**2).ravel())
+        B = X[k].T.dot((frames/frames_err**2).ravel()[k])
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         model = (X.dot(w)).reshape(visit.shape)
@@ -746,7 +691,7 @@ def fit_transmission_spectrum(obs):
 
         ff = np.average((frames-model)[oot_transit], weights=1/frames_err[oot_transit], axis=0)
 
-        B = X.T.dot(((frames - ff)/frames_err**2).ravel())
+        B = X[k].T.dot(((frames - ff)/frames_err**2).ravel()[k])
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         model = (X.dot(w)).reshape(visit.shape)
@@ -778,6 +723,7 @@ def fit_vsr_slant(visit):
     frames = (frames.T/np.average(frames, weights=1/visit.error, axis=(1, 2))).T
     frames[(frames_err/frames) > 0.1] = 1
     frames[np.abs(frames - 1) > 0.3] = 1
+    frames -= 1
 
     vsr_grad = np.ones_like(frames)
     k = (np.abs(visit.Y[0]) < -visit.Y[0][2][0]).ravel()
@@ -803,8 +749,8 @@ def fit_vsr_slant(visit):
     for tdx in (range(visit.nt)):
         A = As[tdx]
         sigma_w_inv = A[k].T.dot(A[k]/frames_err[tdx].ravel()[k, None]**2)
-        B = A[k].T.dot(((frames[tdx] - 1)/frames_err[tdx]**2).ravel()[k])
+        B = A[k].T.dot(((frames[tdx])/frames_err[tdx]**2).ravel()[k])
         w = np.linalg.solve(sigma_w_inv, B)
-        vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:]) + 1
+        vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:])
 
     return vsr_grad
