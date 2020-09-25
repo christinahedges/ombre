@@ -57,16 +57,19 @@ class Visit(object):
             raise ValueError('No valid cadences remaining.')
         [setattr(self, key, getattr(observation, key)[s])
             for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
-                        'hdrs', 'postarg1', 'postarg2',
-                        'sun_alt', 'velocity_aberration', '_filenames', 'forward']
+                        'postarg1', 'postarg2',
+                        'sun_alt', 'velocity_aberration', '_filenames', 'forward', 'crpix1', 'crpix2']
                          if hasattr(observation, key)]
-
+        setattr(self, 'hdrs', [observation.hdrs[idx] for idx in np.where(s)[0]])
 
         self.propid = self.propid[0]
         [setattr(self, key, getattr(observation, key))
-            for key in ['ra', 'dec', 'teff']
+            for key in ['ra', 'dec']
                          if hasattr(observation, key)]
-        self.mask, self.spectral, self.spatial = simple_mask(observation.sci[s])
+
+
+        self.mask, self.spectral, self.spatial = simple_mask(observation.sci[s],
+                                                             filter=self.filters[0])
 
         self.flat = np.ones((1, *observation.sci[s].shape[1:]))
         for count in [0, 1]:
@@ -84,38 +87,6 @@ class Visit(object):
             if count == 0:
                 self.flat = get_flatfield(observation, self, self.model)
 
-        self.error[self.error/self.data > 0.1] = 1e10
-#        res = (self.data / self.model)
-#        res = ((res.T) - np.mean(res, axis=(1, 2))).T
-#        self.cosmic_rays = sigma_clip(res, sigma=8, axis=0).mask
-        m = (self.spec_mean * self.vsr_mean * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
-        med = np.median(self.data - m, axis=0)[None, :, :]
-        m += med
-        cmr = sigma_clip(self.data - m, axis=0, sigma_upper=6, sigma_lower=0).mask
-        cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
-        self.cosmic_rays = cmr
-
-        self.error += self.cosmic_rays * 1e10
-
-        w = np.ones(observation.sci[s].shape)
-        w[observation.err[s]/observation.sci[s] > 0.1] = 1e10
-
-
-        larger_mask = convolve(self.mask[0], Box2DKernel(11)) > 1e-5
-        Y, X = np.mgrid[:observation.sci[s].shape[1], :observation.sci[s].shape[2]]
-        X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(observation.sci[s].shape)
-        Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(observation.sci[s].shape)
-        w1 = (observation.sci[s]/w)[:, larger_mask]
-        w1 = (w1.T/w1.mean(axis=1)).T
-        xshift = np.mean(X[:, larger_mask] * w1, axis=1)
-        self.xshift = xshift - np.median(xshift)
-        yshift = np.mean(Y[:, larger_mask] * w1, axis=1)
-        self.yshift = yshift - np.median(yshift)
-
-        m1 = convolve((observation.sci[s] < 5).any(axis=0), Box2DKernel(20), boundary='fill', fill_value=1) < 0.9
-        m = m1 | (observation.err[s]/observation.sci[s] > 0.5)
-        bkg = sigma_clipped_stats(ma.masked_array(observation.sci[s], m), axis=(1, 2), sigma=3)[1]
-        self.bkg = bkg - np.median(bkg)
 
         T = (np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])).transpose([1, 0, 2])
         T -= self.time[0]
@@ -128,9 +99,65 @@ class Visit(object):
         self.X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(self.data.shape)
         self.Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.data.shape)
 
-        self.sensitivity, self.wavelength = calibrate(self, self.teff)
+
+        self.error[self.error/self.data > 0.1] = 1e10
 
         self.vsr_grad = fit_vsr_slant(self)
+
+        m = (self.spec_mean * (self.vsr_mean + (self.vsr_grad)) * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        med = np.median(self.data - m, axis=0)[None, :, :]
+        m += med
+
+        # Ignore a 2 pixel border when looking for cosmics
+        k = (np.abs(self.Y) > -self.Y[0][2][0])
+        k |= (np.abs(self.X) > -self.X[0][0][2])
+
+        res = np.ma.masked_array(self.data - m, k)
+
+        cmr = sigma_clip(res, axis=0, sigma_upper=6, sigma_lower=0).mask
+        cmr &= ~k
+        cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
+
+        self.cosmic_rays = cmr
+
+        self.error += self.cosmic_rays * 1e10
+
+        self.vsr_grad = fit_vsr_slant(self)
+
+
+        w = np.ones(observation.sci[s].shape)
+        w[observation.err[s]/observation.sci[s] > 0.1] = 1e10
+
+        larger_mask = convolve(self.mask[0], Box2DKernel(21)) > 1e-5
+
+        thumb = np.average(observation.sci[s], weights=1/observation.err[s], axis=0)
+        thumb = thumb[:, np.where(larger_mask.any(axis=0))[0][0]:np.where(larger_mask.any(axis=0))[0][-1] + 1]
+        thumb = thumb[np.where(larger_mask.any(axis=1))[0][0]:np.where(larger_mask.any(axis=1))[0][-1] + 1, :]
+        self.trace = np.mean(thumb, axis=0)
+        self.trace_mask = (larger_mask.any(axis=0) & ~self.mask[0].any(axis=0))[larger_mask.any(axis=0)]
+
+        Y, X = np.mgrid[:observation.sci[s].shape[1], :observation.sci[s].shape[2]]
+        X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(observation.sci[s].shape)
+        Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(observation.sci[s].shape)
+        w1 = (observation.sci[s]/w)[:, larger_mask]
+        w1 = (w1.T/w1.mean(axis=1)).T
+        xshift = np.mean(X[:, larger_mask] * w1, axis=1)
+        self.xshift = xshift - np.median(xshift)
+        yshift = np.mean(Y[:, larger_mask] * w1, axis=1)
+        self.yshift = yshift - np.median(yshift)
+
+
+        #m1 = convolve((observation.sci[s] < 5).any(axis=0), Box2DKernel(20), boundary='fill', fill_value=1) < 0.9
+        m1 = larger_mask
+        m = m1 | (observation.err[s]/observation.sci[s] > 0.5)
+        bkg = sigma_clipped_stats(ma.masked_array(observation.sci[s], m), axis=(1, 2), sigma=3)[1]
+        self.bkg = bkg - np.median(bkg)
+
+
+        self.wavelength, self.sensitivity, self.sensitivity_t = calibrate(self)
+        self.wavelength = self.wavelength[~self.trace_mask]
+        self.sensitivity = self.sensitivity[~self.trace_mask]
+        self.sensitivity_t = self.sensitivity_t[~self.trace_mask]
 
     def __repr__(self):
         return '{} Visit {}, {} [Proposal ID: {}]'.format(self.name, self.visit_number, self.direction, self.propid)
@@ -166,10 +193,11 @@ class Visit(object):
         res = (self.data / m - self.partial_model)
         k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
 
-        vmin, vmax = np.percentile(res, [3, 97])
+        v = np.max(np.abs(np.percentile(res, [3, 97])))
+
         if output is None:
             output = f'{self.name}_resids.mp4'
-        animate((res/k), vmin=vmin, vmax=vmax, cmap='coolwarm', output=output)
+        animate((res/k), vmin=-v, vmax=v, cmap='coolwarm', output=output)
 
 
     def plot_channel_lcs(self):
@@ -274,11 +302,11 @@ class Observation(object):
                             'hdrs', 'postarg1', 'postarg2', 'visits',
                             'sun_alt', 'velocity_aberration', '_filenames', 'sci',
                             'err', 'dq', 'forward', 'orbits',
-                             'ra', 'dec', 'nt', 'ns', 'sys', 'teff', 'bkg',
-                              'model_lc', 'model_lc_no_ld', 'wl_map_soln', 'trace']]
+                             'ra', 'dec', 'nt', 'ns', 'sys', 'bkg',
+                              'model_lc', 'model_lc_no_ld', 'wl_map_soln', 'trace', 'crpix1', 'crpix2']]
 
     @staticmethod
-    def from_file(filenames, propid=None, visit=None, teff=6000, name=None, t0=None):
+    def from_file(filenames, propid=None, visit=None, name=None, t0=None):
         """HST Observation.
 
         Parameters
@@ -299,9 +327,7 @@ class Observation(object):
         if not np.all([fname.endswith('_flt.fits') for fname in self.filenames]):
             raise ValueError('`filenames` must all be `_flt.fits` files. e.g. {}'.format(self.filenames[0]))
 
-        self.teff = teff
-        self.hdrs = np.asarray([fits.getheader(file) for idx, file in enumerate(self.filenames)])
-
+        self.hdrs = [fits.getheader(file) for idx, file in enumerate(self.filenames)]
         if name is None:
             self.name = np.asarray([hdr['TARGNAME'] for hdr in self.hdrs])
         else:
@@ -321,6 +347,42 @@ class Observation(object):
         self.filters = np.asarray([hdr['FILTER'] for hdr in self.hdrs])
         mask = (self.filters == 'G141') | (self.filters == 'G102')
 
+
+        convert_time = lambda hdr:(Time(datetime.strptime('{}-{}'.format(hdr['DATE-OBS'],
+                                                              hdr['TIME-OBS']), '%Y-%m-%d-%H:%M:%S')).jd,
+								   Time(datetime.strptime('{}'.format(hdr['DATE-OBS']), '%Y-%m-%d')).jd)
+
+        dimage_time = []
+        dimage_x = []
+        dimage_y = []
+        dimage_crpix1 = []
+        dimage_crpix2 = []
+        dimage_filter = []
+        dimage_filenames = []
+
+        for f in self.filenames[~mask]:
+            with fits.open(f) as hdu:
+                Y, X = np.mgrid[:hdu[1].data.shape[0], :hdu[1].data.shape[1]]
+                dimage_filter.append(hdu[0].header['FILTER'])
+                dimage_time.append(convert_time(hdu[0].header)[0])
+                w = hdu[1].data
+                cent = np.unravel_index(np.argmax(hdu[1].data), hdu[1].data.shape)
+                a = np.in1d(np.arange(hdu[1].data.shape[0]), np.arange(cent[0] - 5, cent[0] + 5))
+                b = np.in1d(np.arange(hdu[1].data.shape[1]), np.arange(cent[1] - 5, cent[1] + 5))
+                w *= (a[:, None] * b[None, :]).astype(float)
+                dimage_x.append(np.average(X, weights=w))
+                dimage_y.append(np.average(Y, weights=w))
+                dimage_crpix1.append(hdu[1].header['CRPIX1'])
+                dimage_crpix2.append(hdu[1].header['CRPIX2'])
+                dimage_filenames.append(f)
+
+        self.dimage_time, self.dimage_x, self.dimage_y = np.asarray(dimage_time), np.asarray(dimage_x), np.asarray(dimage_y)
+        self.dimage_filter = np.asarray(dimage_filter)
+        self.dimage_crpix1 = np.asarray(dimage_crpix1)
+        self.dimage_crpix2 = np.asarray(dimage_crpix2)
+        self.dimage_filenames = np.asarray(dimage_filenames)
+
+
         self.exptime = np.asarray([hdr['EXPTIME'] for hdr in self.hdrs])
         #if not (self.exptime[mask] == np.median(self.exptime[mask])).all():
         #    warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((self.exptime[mask] != np.median(self.exptime[mask])).sum(), len(self.exptime[mask])))
@@ -336,36 +398,35 @@ class Observation(object):
         if not mask.any():
             raise ValueError('All cadences are masked.')
 
-        convert_time = lambda hdr:(Time(datetime.strptime('{}-{}'.format(hdr['DATE-OBS'],
-                                                              hdr['TIME-OBS']), '%Y-%m-%d-%H:%M:%S')).jd,
-								   Time(datetime.strptime('{}'.format(hdr['DATE-OBS']), '%Y-%m-%d')).jd)
-
 
         self.time, self.start_date = np.asarray([convert_time(hdr) for hdr in self.hdrs]).T
         s = np.argsort(self.time)
         [setattr(self, key, getattr(self, key)[s])
-                for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'hdrs', 'filenames']]
+                for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'filenames']]
+
+        setattr(self, 'hdrs', [self.hdrs[idx] for idx in s])
+
         mask = mask[s]
 
 #        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 0.8)]
 #        self.nvisits = len(start_dates)
 #        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 0.8) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
 
-        split = np.where(np.diff(self.time) > 0.8)[0] + 1
+        split = np.where(np.diff(self.time) > 0.5)[0] + 1
         self.nvisits = len(split) + 1
         self.visit_number = np.hstack([np.ones(len(s), int) * (idx + 1) for idx, s in enumerate(np.array_split(self.time, split))])
-
-        if visit != None:
-            if visit > self.nvisits:
-                raise ValueError('Only {} visits available.'.format(self.nvisits))
-            mask &= self.visit_number == visit
+        if visit is not None:
+            #if visit > self.nvisits:
+            #    raise ValueError('Only {} visits available.'.format(self.nvisits))
+            mask &= np.in1d(self.visit_number, visit)
         self.time, self.start_date, self.visit_number, self.propid, self.exptime, self.filters =\
             self.time[mask], self.start_date[mask], self.visit_number[mask], self.propid[mask],\
             self.exptime[mask], self.filters[mask]
         self.postarg1 = np.asarray([hdr['POSTARG1'] for hdr in self.hdrs])[mask]
         self.postarg2 = np.asarray([hdr['POSTARG2'] for hdr in self.hdrs])[mask]
         self.sun_alt = np.asarray([hdr['SUN_ALT'] for hdr in self.hdrs])[mask]
-        self.hdrs = self.hdrs[mask]
+        setattr(self, 'hdrs', [self.hdrs[idx] for idx in np.where(mask)[0]])
+#        self.hdrs = self.hdrs[mask]
 
         self.ra = self.hdrs[0]['RA_TARG']
         self.dec = self.hdrs[0]['DEC_TARG']
@@ -396,10 +457,14 @@ class Observation(object):
                 except ValueError:
                     continue
 
+#        literature_calibrate(self)
+
     def _load_data(self):
         """ Helper function to load in the data """
         self.sci, self.err, self.dq = np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns), dtype=int)
         self.velocity_aberration = np.zeros(self.nt)
+        self.crpix1 = np.zeros(self.nt)
+        self.crpix2 = np.zeros(self.nt)
         for jdx, file in enumerate(self._filenames):
             hdulist = fits.open(file)
             self.sci[jdx], self.err[jdx], self.dq[jdx] = np.asarray([hdu.data for hdu in hdulist[1:4]])
@@ -407,6 +472,9 @@ class Observation(object):
                 self.sci[jdx] /= hdulist[1].header['SAMPTIME']
                 self.err[jdx] /= hdulist[1].header['SAMPTIME']
             self.velocity_aberration[jdx] = hdulist[1].header['VAFACTOR']
+            self.crpix1[jdx] = hdulist[1].header['CRPIX1']
+            self.crpix2[jdx] = hdulist[1].header['CRPIX2']
+
             hdulist.close('all')
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
         self.err[(self.dq & qmask) != 0] = 1e10
@@ -491,7 +559,6 @@ class Observation(object):
             else:
                 raise ValueError("Can not parse direction {}. "
                                     "Choose from `'forward'` or `'backward'`".format(direction))
-
         return Observation.from_file(paths, **kwargs)
 
     def __repr__(self):
@@ -501,10 +568,10 @@ class Observation(object):
         return '{} (WFC3 Observation)'.format(self.name)
 
 
-    def fit_transit(self, sample=True):
+    def fit_transit(self, sample=True, fit_period=True):
         t = [v.time for v in self.visits]
-        lcs = [v.average_lc for v in self.visits]
-        lcs_err = [v.average_lc_errors for v in self.visits]
+        lcs = [v.average_lc/v.average_lc.mean() for v in self.visits]
+        lcs_err = [v.average_lc_errors/v.average_lc.mean() for v in self.visits]
         orbits = [v.orbits for v in self.visits]
         xs = [v.xshift for v in self.visits]
         bkg = [v.bkg for v in self.visits]
@@ -516,12 +583,16 @@ class Observation(object):
                         r_star=self.sys.primary.r.eval(),
                         m_star=self.sys.primary.m.eval(),
                         exptime=np.median(self.exptime) / (3600 * 24),
-                        sample=sample)
+                        sample=sample, fit_period=fit_period)
         if sample:
             self.wl_map_soln = r[0]
             self.trace = r[1]
         else:
             self.wl_map_soln = r
+
+        if 'period' in self.wl_map_soln:
+            self.sys.secondaries[0].porb = self.wl_map_soln['period']
+        self.sys.secondaries[0].t0 = self.wl_map_soln['t0']
 
         self.model_lc = self.wl_map_soln['light_curve']
         self.model_lc_no_ld = self.wl_map_soln['no_limb']
@@ -531,21 +602,32 @@ class Observation(object):
             self[idx].model_lc = self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])]
             self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
 
+        for visit in self:
+            visit.vsr_grad = fit_vsr_slant(visit)
     #    break
 
-    def fit_transmission_spectrum(self, sample=True):
-        ts, ts_err, model, partial_model, w, sigma_w = fit_transmission_spectrum(self)
+    def fit_transmission_spectrum(self, sample=True, npoly=3):
+        ts, ts_err, model, partial_model, w, sigma_w = fit_transmission_spectrum(self, npoly=npoly)
         for idx, ts1, ts_err1 in zip(range(len(ts)), ts, ts_err):
-            k = self.visits[idx].spec_mean[0, 0] < 0.8
-            self.visits[idx].ts = ma.masked_array(ts1, k)
-            self.visits[idx].ts_err = ma.masked_array(ts_err1, k)
-            self.visits[idx].full_model = model[idx]
-            self.visits[idx].partial_model = partial_model[idx]
-            self.visits[idx].w = w[idx]
-            self.visits[idx].sigma_w = sigma_w[idx]
+            if ts1 is None:
+                self.visits[idx].ts = None
+                self.visits[idx].ts_err = None
+                self.visits[idx].full_model = None
+                self.visits[idx].partial_model = None
+                self.visits[idx].w = None
+                self.visits[idx].sigma_w = None
+            else:
+                k = self.visits[idx].spec_mean[0, 0] < 0.8
+                self.visits[idx].ts = ma.masked_array(ts1, k)
+                self.visits[idx].ts_err = ma.masked_array(ts_err1, k)
+                self.visits[idx].full_model = model[idx]
+                self.visits[idx].partial_model = partial_model[idx]
+                self.visits[idx].w = w[idx]
+                self.visits[idx].sigma_w = sigma_w[idx]
+        self.munge()
 
+    def munge(self):
         visits_numbers = [v.visit_number for v in self]
-
         wavelength, transmission_spec, transmission_spec_err = [], [], []
         for vn in np.unique(visits_numbers):
             vloc = np.where(visits_numbers == vn)[0]
@@ -557,8 +639,22 @@ class Observation(object):
                     w.append(self.visits[vdx].wavelength)
                     ts.append(self.visits[vdx].ts)
                     tse.append(self.visits[vdx].ts_err)
+                if len(w) == 0:
+                    continue
+                elif len(w) == 1:
+                    w, ts, tse = w[0], ts[0], tse[0]
+                elif len(w) == 2:
+                    try:
+                        w, ts, tse = np.vstack(w).mean(axis=0), np.ma.mean(ts, axis=0), np.ma.hypot(*np.vstack(tse))
+                    except ValueError:
+                        w, ts, tse = np.hstack(w), np.ma.hstack(ts), np.ma.hstack(tse)
+                        s = np.argsort(w)
+                        w, ts, tse = w[s], ts[s], tse[s]
 
-                w, ts, tse = np.vstack(w).mean(axis=0), np.ma.mean(ts, axis=0), np.ma.hypot(*np.vstack(tse))
+                        w = np.asarray([np.mean(a) for a in np.array_split(w, len(w)/2)])
+                        ts = np.ma.masked_array([np.ma.mean(a) for a in np.array_split(ts, len(ts)/2)])
+                        tse = np.ma.masked_array([(np.ma.sum(a**2)**0.5)/len(a) for a in np.array_split(tse, len(tse)/2)])
+
             if len(vloc) == 1:
                 if self.visits[vloc[0]].ts is None:
                     continue
@@ -571,6 +667,7 @@ class Observation(object):
         self.wavelength = wavelength
         self.transmission_spec = transmission_spec
         self.transmission_spec_err = transmission_spec_err
+
 
     @property
     def average_lc(self):
@@ -605,8 +702,13 @@ class Observation(object):
         t_fold = (t - t0 + 0.5 * p) % p - 0.5 * p
         mlc = (self.wl_map_soln['noise_model'] + (self.wl_map_soln['light_curve']** 0) * self.wl_map_soln['normalization'])
         fig = plt.figure(figsize=(10, 4))
-        plt.scatter(t_fold, np.hstack(self.average_lc) / np.median(np.hstack(self.average_lc)), c='r', s=4, label='Raw Data')
-        plt.scatter(t_fold, np.hstack(self.average_lc) / mlc, c='k', s=7, label='Corrected Data')
+        raw = np.hstack([v.average_lc/v.average_lc.mean() for v in self.visits])
+        corr = np.hstack([v.average_lc/v.average_lc.mean() for v in self.visits])/mlc
+
+        raw *= np.median(corr/raw)
+
+        plt.scatter(t_fold, raw, c='r', s=4, label='Raw Data')
+        plt.scatter(t_fold, corr, c='k', s=7, label='Corrected Data')
         plt.scatter(t_fold, self.wl_map_soln['light_curve'], c='lime', s=3, label='Transit Model')
         plt.xlabel("Time")
         plt.ylabel('Normalized Flux')
@@ -712,6 +814,13 @@ class Observation(object):
     def write(self, output=None):
 
         #        break
+        channel_lcs = []
+        for visit in self:
+            m = ((visit.vsr_mean + (visit.vsr_grad))* np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
+            res = (visit.data / m - visit.partial_model)
+            k = ((np.abs(visit.Y) < -visit.Y[0][2][0])) * ~visit.cosmic_rays
+            a = (np.sum(res * k, axis=1)/np.sum(k, axis=1)).T
+            channel_lcs.append(a)
 
         r = {'name':self.name,
              'time':self.time,
@@ -726,11 +835,57 @@ class Observation(object):
              'transmission_spectrum_err':self.transmission_spec_err,
              'yshift':np.hstack([v.yshift for v in self]),
              'xshift':np.hstack([v.xshift for v in self]),
-             'wl_map_soln':self.wl_map_soln}
+             'wl_map_soln':self.wl_map_soln,
+             'channel_lcs':channel_lcs}
+
         if output is None:
             output = f'{self.name}_output.p'
         pickle.dump(r, open(output, 'wb'))
 
+
+
+    def save(self, dir='results'):
+        if not os.path.isdir('{}/{}'.format(dir, self.name)):
+            os.mkdir('{}/{}'.format(dir, self.name))
+
+        for idx, visit in enumerate(self):
+            if visit.ts is None:
+                continue
+            fig = visit.plot_average_lc();
+            fig.savefig('{}/{}/average_lc_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
+            plt.close(fig)
+            visit.animate_residuals(output='results/{}/residuals_{}.mp4'.format(self.name, idx + 1))
+            fig = visit.plot_channel_lcs();
+            fig.savefig('{}/{}/channel_lcs_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
+            plt.close(fig)
+            fig, ax = plt.subplots()
+            ax.plot(visit.wavelength, visit.spec_mean[0][0]/np.median(visit.spec_mean[0][0]), label='Data', c='k')
+            ax.plot(visit.wavelength, visit.sensitivity_t, label='Detector Sensitivity', c='r')
+            ax.set(xlabel=('Wavelength [A]'), yticks=[])
+            plt.legend()
+            plt.title(visit.__repr__())
+            fig.savefig('{}/{}/wavelength_calibration_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
+            plt.close(fig)
+
+
+        fig = self.plot_transit_fit();
+        fig.savefig('{}/{}/average_lc_all.png'.format(dir, self.name), bbox_inches='tight', dpi=200)
+        plt.close(fig)
+
+        for filter in np.unique(self.filters):
+            fig, ax = plt.subplots()
+            for idx, w, ts, tse in zip(range(len(self.wavelength)), self.wavelength, self.transmission_spec, self.transmission_spec_err):
+                if self[idx].filters[0] != filter:
+                    continue
+                ax.errorbar(w, ts, tse, label=f'Visit {idx + 1}', lw=0.5)
+            plt.title(self.name)
+            plt.legend()
+            plt.xlabel('Wavelength [A]')
+            plt.ylabel('$\delta$ Transit Depth [ppm]')
+            fig.savefig('{}/{}/ts_all_{}.png'.format(dir, self.name, filter), bbox_inches='tight', dpi=200)
+            plt.close(fig)
+
+        self.write(output='{0}/{1}/{1}_results.p'.format(dir, self.name))
 
     # def correct(self):
     #     self.model = fit_data(self)

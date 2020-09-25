@@ -67,7 +67,7 @@ def animate(data, scale='linear', output='out.mp4', **kwargs):
     anim.save(output, dpi=150)
 
 
-def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.2):
+def simple_mask(sci, filter='G141'):
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')
         mask = np.atleast_3d(sci.mean(axis=0) > np.nanpercentile(sci, 50)).transpose([2, 0, 1])
@@ -78,19 +78,34 @@ def simple_mask(sci, spectral_cut=0.3, spatial_cut=0.2):
         spectral = np.nanmean(data, axis=(0, 1))
         spatial = np.nanmean(data, axis=(0, 2))
 
+        spatial_cut = 0.2
+        if filter == 'G102':
+            spectral_cut = 0.1
+        if filter == 'G141':
+            spectral_cut = 0.3
+
         spectral = spectral > np.nanmax(spectral) * spectral_cut
+        if filter == 'G102':
+            edge = np.where((np.gradient(spectral/np.nanmax(spectral)) < -0.07))[0][0] - 10
+            m = np.ones(len(spectral), bool)
+            m[edge:] = False
+            spectral &= m
+
         spatial = spatial > np.nanmax(spatial) * spatial_cut
 
         mask = (np.atleast_3d(np.atleast_2d(spectral) * np.atleast_2d(spatial).T)).transpose([2, 0, 1])
 
         # Cut out the zero phase dispersion!
         # Choose the widest block as the true dispersion...
-        secs = mask.any(axis=0).astype(int)
+        secs = mask[0].any(axis=0).astype(int)
         len_secs = np.diff(np.where(np.gradient(secs) != 0)[0][::2] + 1)[::2]
         if len(len_secs) > 1:
-            a = (np.where(np.gradient(secs) != 0)[0][::2] + 1)[np.argmax(len_secs)*2:np.argmax(len_secs)*2+2]
-            b = ((np.in1d(np.arange(len(mask)), np.arange(a[0] - 20, a[1] + 20)))[:, None] * np.ones(len(mask))).T
-            mask *= b[None, :, :].astype(bool)
+            #a = (np.where(np.gradient(secs) != 0)[0][::2] + 1)[np.argmax(len_secs)*2:np.argmax(len_secs)*2+2]
+            #print(a)
+            #b = ((np.in1d(np.arange(len(mask)), np.arange(a[0] - 20, a[1] + 20)))[:, None] * np.ones(len(mask))).T
+            #print(b)
+            mask[:, :, :np.where(np.gradient(secs) > 0)[0][3]] &= False
+            spectral = mask[0].any(axis=0)
 
     return mask, np.atleast_3d(np.atleast_2d(spectral)).transpose([2, 0, 1]), np.atleast_3d(np.atleast_2d(spatial.T)).transpose([2, 1, 0])
 
@@ -143,38 +158,119 @@ def get_flatfield(obs, visit, model):
     return flat
 
 
-def calibrate(obs, teff, kdx=0):
-    g141_sensfile = CALIPATH+'WFC3.IR.G141.1st.sens.2.fits'
+
+def literature_calibrate(obs):
+    for visit in obs:
+        t = visit.time[0] - obs.dimage_time
+        t[t < 0] = np.nan
+        l = np.nanargmin(t)
+
+        dcrpix1, dcrpix2 = obs.dimage_crpix1[l], obs.dimage_crpix2[l]
+        src_x, src_y = obs.dimage_x[l], obs.dimage_y[l]
+        dx, dy = visit.crpix1[0] - dcrpix1, visit.crpix2[0] - dcrpix2
+
+        Y, X = np.mgrid[:visit.mask.shape[1], :visit.mask.shape[2]]
+        xp = (1024/2 - visit.mask.shape[1]/2) + visit.crpix1[0] + visit.postarg1[0]
+        yp = (1024/2 - visit.mask.shape[1]/2) + visit.crpix2[0]
+        m = visit.mask[0].astype(float)
+        m[m == 0] = np.nan
+        yc = np.nanmean((Y * m))
+        xc = np.nanmean((X * m), axis=(0))
+        d = (xc - dx - src_x)
+        xp = src_x + (1024/2 - visit.mask.shape[1]/2) + dcrpix1
+        yp = src_y + (1024/2 - visit.mask.shape[1]/2) + dcrpix2
+        if visit.filters[0] == 'G141':
+            Bc = [8.95431E3,  9.35925E-2, 0]
+            Bm = [4.51423E1, 3.17239E-4, 2.17055E-3, -7.42504E-7, 3.48639E-7, 3.09213E-7]
+        elif visit.filters[0] == 'G102':
+            Bc = [6.38738E3, 4.55507E-2, 0]
+            Bm = [2.35716E1, 3.60396E-4, 1.58739E-3, -4.25234E-7, -6.53726E-8, 0]
+        else:
+            raise ValueError('Please pass G141 or G102 images.')
+        c = Bc[0] + Bc[1] * xp + Bc[2] * yp
+        m = Bm[0] + Bm[1] * xp + Bm[3] * xp**2 + Bm[4] * yp * xp + Bm[5] * yp**2 + Bm[2] * yp
+        visit.wavelength = (m * d + c)[visit.mask[0].any(axis=0)]
+
+
+def calibrate(obs, teff=5500, plot=False):
+    filter = obs.filters[0]
+    g141_sensfile = CALIPATH+f'WFC3.IR.{filter}.1st.sens.2.fits'
+
     hdu = fits.open(g141_sensfile)
-    sens_raw = hdu[1].data['SENSITIVITY']
-    wav = hdu[1].data['WAVELENGTH'] * u.angstrom
-    bb = blackbody_lambda(wav, teff)
-    bb /= np.trapz(bb, wav)
-    sens = sens_raw * bb.value
-    sens /= np.median(sens)
-    dw = wav.value[10 + np.argmin(np.gradient(sens[10:-10]))] - wav.value[10 + np.argmax(np.gradient(sens[10:-10]))]
-    w_mean = np.mean(wav.value)
+    data = np.copy(obs.trace)
+    data /= np.median(data)
 
-    def func(params, return_model=False):
-        model = np.interp(np.arange(0, obs.shape[2]), (wav.value - w_mean)/dw *  params[0] + params[1], sens)
-        if return_model:
-            return model
-        return np.sum((obs.spec_mean[0, 0] - model)**2)
 
-    na = 200
-    nb = 201
-    a = np.linspace(100, 150, na)
-    b = np.linspace(40, 100, nb)
-    chi = np.zeros((na, nb))
-    for idx, a1 in enumerate(a):
-        for jdx, b1 in enumerate(b):
-            chi[idx, jdx] = np.sum((obs.spec_mean[0, 0] - func([a1, b1], return_model=True))**2)
+    cent = np.average(np.arange(data.shape[0]), weights=data)
 
-    l = np.unravel_index(np.argmin(chi), chi.shape)
-    params = [a[l[0]], b[l[1]]]
-    wavelength = ((np.arange(obs.shape[2]) - params[1]) / params[0]) * dw + w_mean
-    sensitivity = np.interp(wavelength, wav, sens_raw)
-    return sensitivity, wavelength
+    for count in [0, 1, 2]:
+        sens_raw = hdu[1].data['SENSITIVITY']
+        wav = hdu[1].data['WAVELENGTH'] * u.angstrom
+        bb = blackbody_lambda(wav, teff)
+        bb /= np.trapz(bb, wav)
+        sens = sens_raw * bb.value
+        sens /= np.median(sens)
+
+        if filter == 'G141':
+            dw = 17000 - 10500
+        else:
+            dw = 11500 - 7700
+        w_mean = np.mean(wav.value)
+
+        g1 = np.gradient(sens)
+        g1[:100] = 0
+        g1[-100:] = 0
+        if filter == 'G141':
+            sens[np.argmax(g1)+300:np.argmin(g1)-300] = np.nan
+
+        def func(params, return_model=False):
+            model = np.interp(np.arange(0, data.shape[0]), (wav.value - w_mean)/dw *  params[0] + params[1], sens)
+            if return_model:
+                return model
+            return np.nansum((obs.spec_mean[0, 0] - model)**2)/(np.isfinite(model).sum())
+        na = 200
+        nb = 201
+        if filter == 'G141':
+            a = np.linspace((data.shape[0])*0.85, (data.shape[0])*1.1, na)
+            b = np.linspace(cent - 3, cent + 3, nb)
+        if filter == 'G102':
+            a = np.linspace((data.shape[0])*0.85, (data.shape[0])*1.1, na)
+            b = np.linspace(cent - 7, cent + 7, nb)
+        chi = np.zeros((na, nb))
+        for idx, a1 in enumerate(a):
+            for jdx, b1 in enumerate(b):
+                model = func([a1, b1], return_model=True)
+                if filter == 'G102':
+                    model[np.where(data > 0.6)[0][0]: np.where(np.gradient(data) < -0.1)[0][0] - 5] = np.nan
+                chi[idx, jdx] = np.nansum((data - model)**2)/(np.isfinite(model).sum())
+        l = np.unravel_index(np.argmin(chi), chi.shape)
+        params = [a[l[0]], b[l[1]]]
+        wavelength = ((np.arange(data.shape[0]) - params[1]) / params[0]) * dw + w_mean
+        sens = sens_raw #* bb.value[10:-10]
+        sens /= np.median(sens)
+
+        sensitivity = np.interp(wavelength, wav, sens)
+        def func(teff):
+            bb = blackbody_lambda(wavelength, teff)
+            bb /= np.trapz(bb, wavelength)
+            sens1 = sensitivity * bb.value
+            sens1 /= np.median(sens1)
+            return np.nansum((data - sens1)**2/data)
+        r = minimize(func, [4000], method='TNC', bounds=[(1000, 20000)])
+        teff = r.x[0]
+
+    bb = blackbody_lambda(wavelength, teff)
+    bb /= np.trapz(bb, wavelength)
+    sensitivity_t = sensitivity * bb.value
+    sensitivity_t /= np.median(sensitivity_t)
+
+    if plot:
+        plt.figure()
+        plt.pcolormesh(a, b, chi.T, cmap='coolwarm')
+        plt.colorbar()
+        plt.scatter(*params, c='lime')
+        plt.scatter(data.shape[0], cent, c='orange', marker='x')
+    return wavelength, sensitivity, sensitivity_t
 
 
 def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offset=True, bkg=True, npoly=3):
@@ -345,7 +441,7 @@ def build_vsr(obs, errors=False):
 
 
 
-def build_spectrum(obs, errors=False, npoly=2):
+def build_spectrum(obs, errors=False, npoly=3):
 
     def _make_A(obs):
         diags = np.diag(np.ones(obs.shape[1]))
@@ -537,10 +633,11 @@ def build_spectrum(obs, errors=False, npoly=2):
 #         return map_soln
 
 
-def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_val, r_star, m_star, exptime, sample=True):
+def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_val, r_star, m_star, exptime, sample=True, fit_period=True):
 
     x, y, yerr = np.hstack(t), np.hstack(lcs), np.hstack(lcs_err)
-    cadence_mask = y > 15
+#    cadence_mask = y > 15
+    cadence_mask = np.ones(len(y), bool)
     breaks = np.where(np.diff(x) > 2)[0] + 1
     long_time = [(i - i.mean())/(i.max() - i.min()) for i in np.array_split(x, breaks)]
     orbit_trends = [np.hstack([(t[idx][o] - t[idx][o].min())/(t[idx][o].max() - t[idx][o].min()) - 0.5 for o in orbits[idx][:, np.any(orbits[idx], axis=0)].T]) for idx in range(len(t))]
@@ -558,6 +655,7 @@ def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_v
 
     # Hacky garbage
     A = np.nan_to_num(A)
+    A = np.asarray(A)
 
     with pm.Model() as model:
 
@@ -568,7 +666,10 @@ def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_v
 
         # The time of a reference transit for each planet
         t0 = pm.Uniform("t0", lower=t0_val-period_val/2, upper=t0_val+period_val/2, testval=t0_val)
-        period = period_val
+        if fit_period:
+            period = pm.Normal('period', mu=period_val, sd=0.0001)
+        else:
+            period = period_val
 
         # The Kipping (2013) parameterization for quadratic limb darkening paramters
         #u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
@@ -610,7 +711,7 @@ def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_v
         return map_soln
 
 
-def fit_transmission_spectrum(obs):
+def fit_transmission_spectrum(obs, npoly=3):
     ts = []
     ts_err = []
     models = []
@@ -643,7 +744,7 @@ def fit_transmission_spectrum(obs):
         frames = visit.data / m
         frames_err = visit.error / m
 
-        X1, prior_mu1, prior_sigma1 = _build_X(visit, frames, frames_err, transit=False)
+        X1, prior_mu1, prior_sigma1 = _build_X(visit, frames, frames_err, transit=False, npoly=npoly)
 
 #        m = (visit.vsr_mean + visit.vsr_grad) * np.atleast_3d(wlc).transpose([1, 0, 2])).data
 
@@ -655,14 +756,18 @@ def fit_transmission_spectrum(obs):
         model_lc = visit.model_lc - 1
         model_lc_no_ld = visit.model_lc_no_ld - 1
 
-#        ld = model_lc - model_lc_no_ld
-#        ld = ((np.ones(visit.shape).T * ld).T).ravel()
-#        ld = sparse.hstack([sparse.csr_matrix(ld).T, sparse.csr_matrix(ld * visit.X.ravel()).T ], format='csr')
-        A = sparse.csr_matrix((np.atleast_2d((model_lc - model_lc_no_ld).astype(float)).T * np.ones(visit.shape[:2])).ravel()).T
-        x = np.unique(visit.X)
-        ld = X_tr.multiply(0).copy()
-        for jdx in range(visit.nwav):
-            ld[visit.X.ravel() == x[jdx], A.shape[1] * jdx : A.shape[1] * (jdx + 1)] = A
+        # Individual channel limb darkening
+        # A = sparse.csr_matrix((np.atleast_2d((model_lc - model_lc_no_ld).astype(float)).T * np.ones(visit.shape[:2])).ravel()).T
+        # x = np.unique(visit.X)
+        # ld = X_tr.multiply(0).copy()
+        # for jdx in range(visit.nwav):
+        #     ld[visit.X.ravel() == x[jdx], A.shape[1] * jdx : A.shape[1] * (jdx + 1)] = A
+
+
+        # Polynomial limb limb_darkening
+        ld1 = sparse.csr_matrix(((visit.model_lc - visit.model_lc_no_ld)[:, None, None] * np.ones(visit.shape)).ravel())
+        ld2 = ld1.multiply(visit.X.ravel())
+        ld = sparse.vstack([ld1, ld2]).T
 
         A = sparse.csr_matrix((np.atleast_2d((model_lc_no_ld).astype(float)).T * np.ones(visit.shape[:2])).ravel()).T
         x = np.unique(visit.X)
@@ -674,30 +779,35 @@ def fit_transmission_spectrum(obs):
 
 
         X = sparse.hstack([X1, X_tr2], format='csr')
-        prior_mu = np.hstack([prior_mu1, [0] * 2 * visit.nwav])
-        prior_sigma = np.hstack([prior_sigma1, [0.05] * 2 * visit.nwav])
+        prior_mu = np.hstack([prior_mu1, [0] * (visit.nwav + 2)])
+        prior_sigma = np.hstack([prior_sigma1, [0.2] * (visit.nwav + 2)])
 
         k = (np.abs(visit.Y) < -visit.Y[0][2][0]).ravel()
 
-        sigma_f_inv = sparse.csr_matrix(1/frames_err.ravel()**2)
+        weights = np.copy(frames_err)
+        weights[weights < 1e10] = np.median(weights[weights < 1e10])
+
+        sigma_f_inv = sparse.csr_matrix(1/weights.ravel()**2)
         sigma_w_inv = X[k].T.dot(X[k].multiply(sigma_f_inv[:, k].T)).toarray()
         sigma_w_inv += np.diag(1. / prior_sigma**2)
-        B = X[k].T.dot((frames/frames_err**2).ravel()[k])
+        B = X[k].T.dot((frames/weights**2).ravel()[k])
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         model = (X.dot(w)).reshape(visit.shape)
         #sigma_w = np.linalg.solve(sigma_w_inv, np.eye(w.shape[0]))
         sigma_w = np.linalg.inv(sigma_w_inv)
 
-        ff = np.average((frames-model)[oot_transit], weights=1/frames_err[oot_transit], axis=0)
+        ff = np.average((frames-model)[oot_transit], weights=1/weights[oot_transit], axis=0)
 
-        B = X[k].T.dot(((frames - ff)/frames_err**2).ravel()[k])
+        B = X[k].T.dot(((frames - ff)/weights**2).ravel()[k])
         B += (prior_mu / prior_sigma**2)
         w = np.linalg.solve(sigma_w_inv, B)
         model = (X.dot(w)).reshape(visit.shape)
         partial_model = (X1.dot(w[:X1.shape[1]])).reshape(visit.shape)
         partial_model -= np.mean(partial_model)
         partial_model += np.mean(model)
+
+
         model += ff
         partial_model += ff
 
@@ -745,7 +855,12 @@ def fit_vsr_slant(visit):
         w = np.linalg.solve(sigma_w_inv, B)
         vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:])
 
-    ff = np.median(frames - vsr_grad, axis=0)
+    if hasattr(visit, 'model_lc'):
+        oot_transit = (visit.model_lc == 1)
+        ff = np.average((frames - vsr_grad)[oot_transit], weights=1/frames_err[oot_transit], axis=0)
+    else:
+        ff = np.median(frames - vsr_grad, axis=0)
+
     for tdx in (range(visit.nt)):
         A = As[tdx]
         sigma_w_inv = A[k].T.dot(A[k]/frames_err[tdx].ravel()[k, None]**2)
