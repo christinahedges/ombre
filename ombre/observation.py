@@ -12,6 +12,7 @@ import os
 import logging
 from scipy import sparse
 import pickle
+import pandas as pd
 
 from astropy.io import fits
 from astropy.time import Time
@@ -21,6 +22,7 @@ from astropy.convolution import convolve, Box2DKernel
 from astroquery.mast import Observations as astropyObs
 
 from .methods import *
+from . import PACKAGEDIR
 
 from starry.extensions import from_nexsci
 
@@ -615,73 +617,11 @@ class Observation(object):
             visit.vsr_mean, visit.vsr_grad = fit_vsr_slant_full(visit)
     #    break
 
-    def fit_transmission_spectrum(self, sample=True, npoly=3):
-        ts, ts_err, model, partial_model, w, sigma_w, X1, prior_sigma, prior_mu = fit_transmission_spectrum(self, npoly=npoly)
-        for idx, ts1, ts_err1 in zip(range(len(ts)), ts, ts_err):
-            if ts1 is None:
-                self.visits[idx].ts = None
-                self.visits[idx].ts_err = None
-                self.visits[idx].full_model = None
-                self.visits[idx].partial_model = None
-                self.visits[idx].w = None
-                self.visits[idx].sigma_w = None
-                self.visits[idx].X1 = None
-                self.visits[idx].prior_sigma = None
-                self.visits[idx].prior_mu = None
-            else:
-                k = self.visits[idx].spec_mean[0, 0] < 0.8
-                self.visits[idx].ts = ma.masked_array(ts1, k)
-                self.visits[idx].ts_err = ma.masked_array(ts_err1, k)
-                self.visits[idx].full_model = model[idx]
-                self.visits[idx].partial_model = partial_model[idx]
-                self.visits[idx].w = w[idx]
-                self.visits[idx].sigma_w = sigma_w[idx]
-                self.visits[idx].X1 = X1
-                self.visits[idx].prior_sigma = prior_sigma
-                self.visits[idx].prior_mu = prior_mu
-        self.munge()
+    def fit_transmission_spectrum(self):
 
-    def munge(self):
-        visits_numbers = [v.visit_number for v in self]
-        wavelength, transmission_spec, transmission_spec_err = [], [], []
-        for vn in np.unique(visits_numbers):
-            vloc = np.where(visits_numbers == vn)[0]
-            if len(vloc) == 2:
-                w, ts, tse = [], [], []
-                for vdx in vloc:
-                    if self.visits[vdx].ts is None:
-                        continue
-                    w.append(self.visits[vdx].wavelength)
-                    ts.append(self.visits[vdx].ts)
-                    tse.append(self.visits[vdx].ts_err)
-                if len(w) == 0:
-                    continue
-                elif len(w) == 1:
-                    w, ts, tse = w[0], ts[0], tse[0]
-                elif len(w) == 2:
-                    try:
-                        w, ts, tse = np.vstack(w).mean(axis=0), np.ma.mean(ts, axis=0), np.ma.hypot(*np.vstack(tse))
-                    except ValueError:
-                        w, ts, tse = np.hstack(w), np.ma.hstack(ts), np.ma.hstack(tse)
-                        s = np.argsort(w)
-                        w, ts, tse = w[s], ts[s], tse[s]
-
-                        w = np.asarray([np.mean(a) for a in np.array_split(w, len(w)/2)])
-                        ts = np.ma.masked_array([np.ma.mean(a) for a in np.array_split(ts, len(ts)/2)])
-                        tse = np.ma.masked_array([(np.ma.sum(a**2)**0.5)/len(a) for a in np.array_split(tse, len(tse)/2)])
-
-            if len(vloc) == 1:
-                if self.visits[vloc[0]].ts is None:
-                    continue
-                w = self.visits[vloc[0]].wavelength
-                ts = self.visits[vloc[0]].ts
-                tse = self.visits[vloc[0]].ts_err
-            wavelength.append(w)
-            transmission_spec.append(ts)
-            transmission_spec_err.append(tse)
-        self.wavelength = wavelength
-        self.transmission_spec = transmission_spec
-        self.transmission_spec_err = transmission_spec_err
+        # make the wavelength grid...
+        w1, w2 = np.asarray(pd.read_csv(PACKAGEDIR + '/data/wav_grid.csv')).T
+        fit_transmission_spectrum(self, w1, w2)
 
 
     @property
