@@ -102,7 +102,7 @@ class Visit(object):
 
         self.error[self.error/self.data > 0.1] = 1e10
 
-        self.vsr_grad = fit_vsr_slant(self)
+        self.vsr_grad = fit_vsr_slant_easy(self)
 
         m = (self.spec_mean * (self.vsr_mean + (self.vsr_grad)) * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         med = np.median(self.data - m, axis=0)[None, :, :]
@@ -122,7 +122,7 @@ class Visit(object):
 
         self.error += self.cosmic_rays * 1e10
 
-        self.vsr_grad = fit_vsr_slant(self)
+        self.vsr_grad = fit_vsr_slant_easy(self)
 
 
         w = np.ones(observation.sci[s].shape)
@@ -568,7 +568,7 @@ class Observation(object):
         return '{} (WFC3 Observation)'.format(self.name)
 
 
-    def fit_transit(self, sample=True, fit_period=True):
+    def fit_transit(self, sample=True, fit_period=True, t0_val=None, period_val=None, r_val=None, r_star_val=None):
         t = [v.time for v in self.visits]
         lcs = [v.average_lc/v.average_lc.mean() for v in self.visits]
         lcs_err = [v.average_lc_errors/v.average_lc.mean() for v in self.visits]
@@ -576,11 +576,20 @@ class Observation(object):
         xs = [v.xshift for v in self.visits]
         bkg = [v.bkg for v in self.visits]
 
+        if t0_val is None:
+            t0_val = self.sys.secondaries[0].t0.eval()
+        if period_val is None:
+            period_val = self.sys.secondaries[0].porb.eval()
+        if r_val is None:
+            r_val = self.sys.primary.r.eval()
+        if r_star_val is None:
+            r_star_val = self.sys.primary.r.eval()
+
         r = fit_transit(t=t, lcs=lcs, lcs_err=lcs_err, orbits=orbits, xshift=xs, background=bkg,
                         r=self.sys.secondaries[0].r.eval(),
-                        t0_val=self.sys.secondaries[0].t0.eval(),
-                        period_val=self.sys.secondaries[0].porb.eval(),
-                        r_star=self.sys.primary.r.eval(),
+                        t0_val=t0_val,
+                        period_val=period_val,
+                        r_star=r_star_val,
                         m_star=self.sys.primary.m.eval(),
                         exptime=np.median(self.exptime) / (3600 * 24),
                         sample=sample, fit_period=fit_period)
@@ -603,11 +612,11 @@ class Observation(object):
             self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
 
         for visit in self:
-            visit.vsr_grad = fit_vsr_slant(visit)
+            visit.vsr_mean, visit.vsr_grad = fit_vsr_slant_full(visit)
     #    break
 
     def fit_transmission_spectrum(self, sample=True, npoly=3):
-        ts, ts_err, model, partial_model, w, sigma_w = fit_transmission_spectrum(self, npoly=npoly)
+        ts, ts_err, model, partial_model, w, sigma_w, X1, prior_sigma, prior_mu = fit_transmission_spectrum(self, npoly=npoly)
         for idx, ts1, ts_err1 in zip(range(len(ts)), ts, ts_err):
             if ts1 is None:
                 self.visits[idx].ts = None
@@ -616,6 +625,9 @@ class Observation(object):
                 self.visits[idx].partial_model = None
                 self.visits[idx].w = None
                 self.visits[idx].sigma_w = None
+                self.visits[idx].X1 = None
+                self.visits[idx].prior_sigma = None
+                self.visits[idx].prior_mu = None
             else:
                 k = self.visits[idx].spec_mean[0, 0] < 0.8
                 self.visits[idx].ts = ma.masked_array(ts1, k)
@@ -624,6 +636,9 @@ class Observation(object):
                 self.visits[idx].partial_model = partial_model[idx]
                 self.visits[idx].w = w[idx]
                 self.visits[idx].sigma_w = sigma_w[idx]
+                self.visits[idx].X1 = X1
+                self.visits[idx].prior_sigma = prior_sigma
+                self.visits[idx].prior_mu = prior_mu
         self.munge()
 
     def munge(self):
@@ -854,7 +869,7 @@ class Observation(object):
             fig = visit.plot_average_lc();
             fig.savefig('{}/{}/average_lc_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
             plt.close(fig)
-            visit.animate_residuals(output='results/{}/residuals_{}.mp4'.format(self.name, idx + 1))
+            visit.animate_residuals(output='{}/{}/residuals_{}.mp4'.format(dir, self.name, idx + 1))
             fig = visit.plot_channel_lcs();
             fig.savefig('{}/{}/channel_lcs_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
             plt.close(fig)
