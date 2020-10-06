@@ -90,6 +90,8 @@ class Visit(object):
                 self.flat = get_flatfield(observation, self, self.model)
 
 
+
+
         T = (np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])).transpose([1, 0, 2])
         T -= self.time[0]
         self.T = (T/T.max() - 0.5)
@@ -104,7 +106,7 @@ class Visit(object):
 
         self.error[self.error/self.data > 0.1] = 1e10
 
-        self.vsr_grad = fit_vsr_slant_easy(self)
+        self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
 
         m = (self.spec_mean * (self.vsr_mean + (self.vsr_grad)) * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         med = np.median(self.data - m, axis=0)[None, :, :]
@@ -124,8 +126,26 @@ class Visit(object):
 
         self.error += self.cosmic_rays * 1e10
 
-        self.vsr_grad = fit_vsr_slant_easy(self)
+        self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
 
+
+        m = (self.vsr_mean + self.vsr_grad) * self.average_lc[:, None, None] * self.spec_mean
+        frames = self.data / m
+        frames_err = self.error / m
+        frames_err = (frames_err/np.average(frames, weights=1/frames_err, axis=(0)))
+        frames = (frames/np.average(frames, weights=1/frames_err, axis=(0)))
+
+        avg = (np.average(frames, axis=2, weights=1/frames_err))
+        std = (np.average((frames - avg[:, :, None])**2, axis=2, weights=1/frames_err))**0.5
+        std /= self.nwav**0.5
+
+        bad = (np.abs(avg - 1)/std > 5)[:, :, None] * np.ones(self.shape, bool)
+
+        mask = ((frames)/frames_err) > 1
+        mask &= ~self.cosmic_rays
+        mask &= ~bad
+
+        self.error[~mask] = 1e10
 
         w = np.ones(observation.sci[s].shape)
         w[observation.err[s]/observation.sci[s] > 0.1] = 1e10
@@ -191,24 +211,35 @@ class Visit(object):
         return r
 
     def animate_residuals(self, output=None):
-        m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
-        res = (self.data / m - self.partial_model)
+
+        m = self.partial_model
+        frames = self.data / m
+        frames_err = self.error / m
+        frames_err = (frames_err/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
+        frames = (frames/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
+
         k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
 
-        v = np.max(np.abs(np.percentile(res, [3, 97])))
+        v = np.max(np.abs(np.nanpercentile(frames - 1, [3, 97])))
 
         if output is None:
             output = f'{self.name}_resids.mp4'
-        animate((res/k), vmin=-v, vmax=v, cmap='coolwarm', output=output)
+        animate(((frames - 1)/k), vmin=-v, vmax=v, cmap='coolwarm', output=output)
 
 
     def plot_channel_lcs(self):
-        m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
-        res = (self.data / m - self.partial_model)
+        #m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+
+        m = self.partial_model
+        frames = self.data / m
+        frames_err = self.error / m
+        frames_err = (frames_err/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
+        frames = (frames/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
+
         k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
 
-        a = (np.sum(res * k, axis=1)/np.sum(k, axis=1)).T
-        vmin, vmax = np.percentile(a, [3, 97])
+        a = np.average(np.nan_to_num(frames), weights=k.astype(float)/frames_err, axis=1).T - 1
+        v = np.max(np.abs(np.nanpercentile(a, [3, 97])))
 
         fig = plt.figure(figsize=(10, 10))
         ax = plt.subplot2grid((5, 1), (0, 0))
@@ -221,11 +252,11 @@ class Visit(object):
         masks = [np.in1d(np.arange(self.nt), m)
                     for m in np.array_split(np.arange(self.nt), np.where(np.append(0, np.diff(self.time)) > dt*1.5)[0])]
         for m in masks:
-            plt.pcolormesh(self.time[m], self.wavelength, a[:, m], vmin=vmin, vmax=vmax, cmap='PRGn')
+            plt.pcolormesh(self.time[m], self.wavelength, a[:, m], vmin=-v, vmax=v, cmap='PRGn')
 
-        bad = np.where(np.gradient(self.ts.mask.astype(float)) != 0)[0][::2]
-        plt.fill_between(self.time, self.wavelength[0], self.wavelength[bad[0]], color='k', alpha=0.3)
-        plt.fill_between(self.time, self.wavelength[bad[-1]], self.wavelength[-1], color='k', alpha=0.3)
+        #bad = np.where(np.gradient(self.ts.mask.astype(float)) != 0)[0][::2]
+        #plt.fill_between(self.time, self.wavelength[0], self.wavelength[bad[0]], color='k', alpha=0.3)
+        #plt.fill_between(self.time, self.wavelength[bad[-1]], self.wavelength[-1], color='k', alpha=0.3)
 
         cbar = plt.colorbar(orientation='horizontal')
         cbar.set_label('$\delta$ Transit Depth')
@@ -614,14 +645,15 @@ class Observation(object):
             self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
 
         for visit in self:
-            visit.vsr_mean, visit.vsr_grad = fit_vsr_slant_full(visit)
+            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
     #    break
 
-    def fit_transmission_spectrum(self):
+    def fit_transmission_spectrum(self, npoly=2):
 
         # make the wavelength grid...
         w1, w2 = np.asarray(pd.read_csv(PACKAGEDIR + '/data/wav_grid.csv')).T
-        fit_transmission_spectrum(self, w1, w2)
+        #w1, w2 = w1[::nb], w2[nb-1::nb]
+        fit_transmission_spectrum(self, w1, w2, npoly=npoly)
 
 
     @property
@@ -785,7 +817,7 @@ class Observation(object):
              'raw_flux_err':np.hstack(self.raw_average_lc),
              'model_lc': self.model_lc,
              'model_lc_no_ld':self.model_lc_no_ld,
-             'wavelength':self.wavelength,
+             'wavelength':self.wav_grid,
              'transmission_spectrum':self.transmission_spec,
              'transmission_spectrum_err':self.transmission_spec_err,
              'yshift':np.hstack([v.yshift for v in self]),
@@ -804,8 +836,6 @@ class Observation(object):
             os.mkdir('{}/{}'.format(dir, self.name))
 
         for idx, visit in enumerate(self):
-            if visit.ts is None:
-                continue
             fig = visit.plot_average_lc();
             fig.savefig('{}/{}/average_lc_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
             plt.close(fig)
@@ -827,18 +857,14 @@ class Observation(object):
         fig.savefig('{}/{}/average_lc_all.png'.format(dir, self.name), bbox_inches='tight', dpi=200)
         plt.close(fig)
 
-        for filter in np.unique(self.filters):
-            fig, ax = plt.subplots()
-            for idx, w, ts, tse in zip(range(len(self.wavelength)), self.wavelength, self.transmission_spec, self.transmission_spec_err):
-                if self[idx].filters[0] != filter:
-                    continue
-                ax.errorbar(w, ts, tse, label=f'Visit {idx + 1}', lw=0.5)
-            plt.title(self.name)
-            plt.legend()
-            plt.xlabel('Wavelength [A]')
-            plt.ylabel('$\delta$ Transit Depth [ppm]')
-            fig.savefig('{}/{}/ts_all_{}.png'.format(dir, self.name, filter), bbox_inches='tight', dpi=200)
-            plt.close(fig)
+#        for filter in np.unique(self.filters):
+        fig, ax = plt.subplots()
+        ax.errorbar(self.wav_grid, self.transmission_spec, self.transmission_spec_err, lw=0.5)
+        plt.title(self.name)
+        plt.xlabel('Wavelength [A]')
+        plt.ylabel('$\delta$ Transit Depth [ppm]')
+        fig.savefig('{}/{}/ts_all.png'.format(dir, self.name), bbox_inches='tight', dpi=200)
+        plt.close(fig)
 
         self.write(output='{0}/{1}/{1}_results.p'.format(dir, self.name))
 

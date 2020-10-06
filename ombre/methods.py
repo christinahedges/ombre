@@ -275,135 +275,6 @@ def calibrate(obs, teff=5500, plot=False):
     return wavelength, sensitivity, sensitivity_t
 
 
-def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offset=True, bkg=True, npoly=3):
-    """ Build a design matrix for all the data in three dimensions. """
-
-    As = []
-    for tdx in (range(obs.nt)):
-
-        A = np.hstack([(obs.X[tdx]).ravel()[:, None],
-                       (obs.Y[tdx]).ravel()[:, None],
-                       (obs.X[tdx] * obs.Y[tdx]).ravel()[:, None],
-                       (obs.X[tdx] * obs.Y[tdx]).ravel()[:, None]**2,
-                       (obs.X[tdx]**0).ravel()[:, None]])
-        As.append(A)
-    As = np.asarray(As)
-    X = sparse.lil_matrix((np.product(obs.shape), (As.shape[2] * obs.nt)))
-    for tdx in range(obs.nt):
-        X[tdx * obs.nsp * obs.nwav : (tdx + 1) * obs.nsp * obs.nwav, tdx * As.shape[2] : (tdx + 1) * As.shape[2]] = As[tdx]
-
-    prior_mu = [0] * A.shape[1]
-    prior_sigma = [0.1] * A.shape[1]
-    prior_mu = np.hstack(prior_mu * obs.nt).astype(float)
-    prior_sigma = np.hstack(prior_sigma * obs.nt).astype(float)
-
-    # X = sparse.csr_matrix(np.ones(np.product(frames.shape))).T
-    # prior_mu = np.asarray([0])
-    # prior_sigma = np.asarray([0.1])
-
-    if spectrum:
-        # Build spectral dimension
-        def _make_A(obs, npoly):
-
-            xshift = obs.xshift
-            xshift -= np.mean(xshift)
-            xshift /= (np.max(xshift) - np.min(xshift))
-            xshift = np.atleast_3d(xshift).transpose([1, 0, 2]) * np.ones(obs.shape)
-
-
-
-#            ones = sparse.csr_matrix(np.ones(y.shape[0])).T
-
-            def poly(x, npoly):
-                mul = lambda x: x.multiply(x)
-                r = sparse.csr_matrix(np.ones(x.shape[0])).T
-                r = sparse.hstack([r, x], format='csr')
-                for i in range(npoly - 2):
-                    r = sparse.hstack([r, mul(r[:, -1])], format='csr')
-                return r
-
-            t2 = sparse.csr_matrix(xshift[:, :, 0].ravel()).T
-            y, t = sparse.csr_matrix(obs.Y[:, :, 0].ravel()).T, sparse.csr_matrix(obs.T[:, :, 0].ravel()).T
-
-            At = poly(t, npoly)
-            At2 = poly(t2, npoly - 1)
-            Ay = poly(y, npoly)
-            A = sparse.hstack([(At.T.multiply(A)).T for A in Ay.T], format='csr')
-            A1 = sparse.hstack([(At2[:, 1:].T.multiply(A)).T for A in Ay.T], format='csr')
-
-            A = sparse.hstack([A, A1])
-
-
-
-            #
-            # Y = obs.Y[:, :, 0].T.ravel()
-            # t = obs.T[:, :, 0].T.ravel()
-            # t2 = sparse.csr_matrix(xshift[:, :, 0].T.ravel())
-            #
-            # a = lk.designmatrix.create_sparse_spline_matrix(t, n_knots=4, degree=2).X
-            # b = lk.designmatrix.create_sparse_spline_matrix(Y, n_knots=4, degree=2).append_constant().X
-            # Ay = sparse.hstack([a.multiply(b[:, idx]) for idx in range(b.shape[1])], format='csr')
-            # #t2 =  sparse.vstack([t2, t2.power(2)], format='csr').T
-            # A = sparse.hstack([Ay, b.multiply(t2.T), b.multiply(t2.T.power(2))], format='lil')
-
-            return A
-
-
-        A = _make_A(obs, npoly)
-        X2 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
-        x = np.unique(obs.X)
-        for idx in range(obs.nwav):
-            X2[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
-        prior_mu = np.hstack([prior_mu, np.zeros(X2.shape[1])])
-        prior_sigma = np.hstack([prior_sigma, np.ones(X2.shape[1]) * 0.1])
-
-        #import pdb;pdb.set_trace()
-        X = sparse.hstack([X, X2], format='lil')
-
-    if bkg:
-        bkg0 = (np.ones(obs.shape).T * obs.bkg).T
-        bkg1 = (obs.spec_mean.T * obs.bkg).T
-        bkg2 = (obs.spec_mean.T**2 * obs.bkg).T
-        bkg3 = (obs.spec_mean.T**3 * obs.bkg).T
-        X_bkg = sparse.csr_matrix(np.vstack([bkg0.ravel(), bkg1.ravel(), bkg2.ravel(), bkg3.ravel()]).T)
-        X = sparse.hstack([X, X_bkg], format='csr')
-        prior_sigma = np.hstack([prior_sigma, [0.1, 0.1, 0.1, 0.1]])
-        prior_mu = np.hstack([prior_mu, [0, 0, 0, 0]])
-
-
-
-    if spectrum_offset:
-        offset = sparse.hstack([sparse.csr_matrix((obs.spec_mean == s).ravel().astype(float)).T
-                                    for s in obs.spec_mean[0, 0]])
-
-        prior_mu = np.hstack([prior_mu, obs.spec_mean[0, 0]])
-        prior_sigma = np.hstack([prior_sigma, np.ones(obs.nwav) * 0.1])
-        X = sparse.hstack([X, offset], format='lil')
-
-
-    if transit:
-       A = sparse.csr_matrix((np.atleast_2d((obs.model_lc - obs.model_lc_no_ld).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
-       X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
-       x = np.unique(obs.X)
-       for idx in range(obs.nwav):
-           X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
-       prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
-       prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.1])
-
-       X = sparse.hstack([X, X3], format='lil')
-
-
-       A = sparse.csr_matrix((np.atleast_2d((obs.model_lc_no_ld - 1).astype(float)).T * np.ones(obs.shape[:2])).ravel()).T
-       X3 = sparse.lil_matrix((np.product(obs.shape), (A.shape[1] * obs.nwav)))
-       x = np.unique(obs.X)
-       for idx in range(obs.nwav):
-           X3[obs.X.ravel() == x[idx], A.shape[1] * idx : A.shape[1] * (idx + 1)] = A
-       prior_mu = np.hstack([prior_mu, np.zeros(X3.shape[1])])
-       prior_sigma = np.hstack([prior_sigma, np.ones(X3.shape[1]) * 0.1])
-
-       X = sparse.hstack([X, X3], format='lil')
-
-    return X.tocsr(), prior_mu, prior_sigma
 
 def build_vsr(obs, errors=False):
     """ Build a full model of the vsr
@@ -510,7 +381,7 @@ def build_spectrum(obs, errors=False, npoly=3):
         vsr_trend  = sparse.csr_matrix((obs._vsr_grad_model[:, :, idx].T * obs.xshift).T.ravel()).T
         A = sparse.hstack([A1, vsr_trend], format='csr')
         prior_mu = np.hstack([prior_mu1, 0])
-        prior_sigma = np.hstack([prior_sigma1, 0.05])
+        prior_sigma = np.hstack([prior_sigma1, 0.1])
 
         frame = frames[:, :, idx]
         frame_err = frames_err[:, :, idx]
@@ -623,142 +494,40 @@ def fit_transit(t, lcs, lcs_err, orbits, xshift, background, r, t0_val, period_v
         return map_soln
 
 
-def fit_vsr_slant_easy(visit):
-    wlc = visit.average_lc
-    m = (visit.spec_mean * visit.vsr_mean * np.atleast_3d(wlc).transpose([1, 0, 2])).data
-    frames = visit.data / m
-    frames_err = visit.error  / m
+def get_vsr_slant(visit):
 
+    k = np.abs(visit.X) < -visit.X[0][0][5]
+    weights = np.copy(1/visit.error)
+    weights[~k] = 0
+#    vsr_mean = np.average(visit.data, weights=weights, axis=2)[:, :, None] * np.ones(visit.shape)
+#    vsr_mean = (vsr_mean.T/np.mean(vsr_mean, axis=(1, 2))).T
+
+    m = visit.average_lc[:, None, None] * visit.spec_mean
+    frames = visit.data / m
+    frames_err = visit.error / m
     if hasattr(visit, 'model_lc_no_ld'):
         frames_err = (frames_err/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
         frames = (frames/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
     else:
         frames_err = (frames_err/np.average(frames, weights=1/frames_err, axis=(0)))
         frames = (frames/np.average(frames, weights=1/frames_err, axis=(0)))
-    frames_err[np.abs(frames - 1) > 0.3] = 1e10
-    frames -= 1
 
+    X = np.vstack([visit.X[0][0]**0, visit.X[0][0], visit.X[0][0]**2, visit.X[0][0]**3]).T
+    model = np.zeros_like(visit.data)
+    prior_sigma = np.ones(4) * 10
+    prior_mu = np.asarray([1, 0, 0, 0])
 
-    vsr_grad = np.ones_like(frames)
-    k = (np.abs(visit.Y[0]) < -visit.Y[0][2][0]).ravel()
-    k &= (np.abs(visit.X[0]) < -visit.X[0][0][3]).ravel()
+    for tdx in range(visit.nt):
+        for idx in range(visit.nsp):
+            sigma_w_inv = X[k[tdx][idx]].T.dot(X[k[tdx][idx]]/frames_err[tdx][idx][k[tdx][idx], None]**2)
+            sigma_w_inv += np.diag(1/prior_sigma**2)
+            B = X[k[tdx][idx]].T.dot(frames[tdx][idx][k[tdx][idx]]/frames_err[tdx][idx][k[tdx][idx]]**2)
+            B += prior_mu/prior_sigma**2
+            model[tdx][idx] = X.dot(np.linalg.solve(sigma_w_inv, B))
 
-    As = []
-    for tdx in (range(visit.nt)):
-        A = np.hstack([np.gradient(visit.vsr_mean[tdx])[0].ravel()[:, None],
-                       np.gradient(np.gradient(visit.vsr_mean[tdx])[0])[0].ravel()[:, None],
-                       np.gradient(np.gradient(np.gradient(visit.vsr_mean[tdx])[0])[0])[0].ravel()[:, None],
-                       visit.X[tdx].ravel()[:, None]])
-        A = np.hstack([A,
-                       (A[:, 0] * A[:, 3])[:, None], (A[:, 1] * A[:, 3])[:, None], (A[:, 2] * A[:, 3])[:, None],
-                       np.ones(A.shape[0])[:, None]])
-
-        A = np.hstack([A, A * visit.spec_mean[0].ravel()[:, None]])
-        As.append(A)
-        sigma_w_inv = A[k].T.dot(A[k]/frames_err[tdx].ravel()[k, None]**2)
-        B = A[k].T.dot(((frames[tdx])/frames_err[tdx]**2).ravel()[k])
-        w = np.linalg.solve(sigma_w_inv, B)
-        vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:])
-
-    if hasattr(visit, 'model_lc'):
-        oot_transit = (visit.model_lc == 1)
-        ff = np.average((frames - vsr_grad)[oot_transit], weights=1/frames_err[oot_transit], axis=0)
-    else:
-        ff = np.median(frames - vsr_grad, axis=0)
-
-    for tdx in (range(visit.nt)):
-        A = As[tdx]
-        sigma_w_inv = A[k].T.dot(A[k]/frames_err[tdx].ravel()[k, None]**2)
-        B = A[k].T.dot(((frames[tdx])/frames_err[tdx]**2).ravel()[k])
-        w = np.linalg.solve(sigma_w_inv, B)
-        vsr_grad[tdx] = A.dot(w).reshape(frames.shape[1:])
-    return vsr_grad
-
-
-
-def fit_vsr_slant_full(visit, nsc=300):
-    m = (visit.spec_mean *  visit.average_lc[:, None, None])
-    frames = visit.data / m
-    frames_err = visit.error  / m
-
-    frames_err = (frames_err/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
-    frames = (frames/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
-    frames_err[np.abs(frames - 1) > 0.3] = 1e10
-    frames -= 1
-
-    X, Y = visit.X[0], visit.Y[0]
-    k = (np.abs(visit.Y[0]) < -visit.Y[0][2][0]).ravel()
-    k &= (np.abs(visit.X[0]) < -visit.X[0][0][3]).ravel()
-
-    dy = np.median(np.diff(Y[:, 0]))
-    #yprime = np.sort((Y[:, 0] + (np.arange(0, 1, 0.1) * dy)[:, None]).ravel())
-    yprime = np.linspace(Y[:, 0].min(), Y[:, 0].max() + dy, len(Y[:, 0].ravel()) * 10)
-
-    I = np.eye(2)
-    I1 = np.zeros((2, 2))
-    I1[1, 0] = 1
-    A = np.vstack([Y.ravel(), X.ravel()]).T
-    knots = np.linspace(Y[:, 0].min(), Y[:, 0].max(), int(len(Y[:, 0])))[1:-1]
-    Aprime = lk.designmatrix.create_sparse_spline_matrix(yprime, knots=knots, degree=2).append_constant().X
-
-    @jit(nopython=True)
-    def calc_score(d, e, binsize=40):
-        """ Calculates the standard deviation in some binsize, quickly. Sums in quadrature to give a score"""
-        stds = [np.std((d[idx - binsize:idx])) for idx in np.arange(binsize, len(d), binsize)]
-        score = 0
-        for std in stds:
-            score += std**2
-        score = score**0.5
-        return score
-
-
-    vsr_model = np.zeros(visit.shape)
-   # As = []
-    for tdx in tqdm(range(visit.nt)):
-        # Find the best fitting shift value.
-        score = np.zeros(nsc)
-        vs = np.linspace(-0.05, 0.05, nsc)
-        for idx, value in enumerate(vs):
-            Yp, Xp = (A @ (I + I1*value)).T
-            s = np.argsort(Yp)
-            dat = frames[tdx].ravel()[s]
-            err = frames_err[tdx].ravel()[s]
-            score[idx] = calc_score(dat, err)
-
-        value = vs[np.argmin(score)]
-        Yp, Xp = (A @ (I + I1*value)).T
-        s = np.argsort(Yp)
-        dat, err, Yp = frames[tdx].ravel()[s], frames_err[tdx].ravel()[s], Yp[s]
-        mask = (Yp > yprime.min()) & (Yp < yprime.max())
-        dat, err, Yp = dat[mask], err[mask], Yp[mask]
-
-        # Use splines to fit a smooth model, so we can find a less noisy gradient
-        A1 = lk.designmatrix.create_sparse_spline_matrix(Yp, knots=knots, degree=2).append_constant().X
-        sigma_w_inv = A1.T.dot(A1.multiply(1/err[:, None]**2)).toarray()
-        B = A1.T.dot((dat/err**2))
-        w = np.linalg.solve(sigma_w_inv, B)
-
-        # Take moments
-        moments = [Aprime.dot(w)]
-        for idx in np.arange(3):
-            moments.append(np.gradient(moments[idx]) * 10)
-        moments = np.asarray(moments)[:, ::10]
-
-
-        # Fit some shiftiness
-        A2 = np.asarray([(m[:, None] * np.ones((visit.nsp, visit.nwav))).ravel() for m in moments]).T
-        A2 = np.hstack([A2, np.ones(A2.shape[0])[:, None]])
-        A2 = np.hstack([A2, A2 * X.ravel()[:, None], A2 * X.ravel()[:, None]**2])
-
-        sigma_w_inv = A2[k].T.dot(A2[k]/frames_err[tdx].ravel()[k, None]**2)
-        B = A2[k].T.dot(((frames[tdx])/frames_err[tdx]**2).ravel()[k])
-        w = np.linalg.solve(sigma_w_inv, B)
-        vsr_model[tdx] = A2.dot(w).reshape(frames[tdx].shape)
-    #    As.append(A2)
-    vsr_mean = np.mean(vsr_model, axis=2)[:, :, None] * np.ones(visit.shape)
-    vsr_grad = vsr_model - vsr_mean
-    return vsr_mean + 1, vsr_grad
-
+    vsr_mean = np.mean(model, axis=2)[:, : ,None] * np.ones(visit.shape)
+    vsr_grad = model - vsr_mean
+    return vsr_mean, vsr_grad
 
 
 def _estimate_arclength(centroid_col, centroid_row):
@@ -776,12 +545,13 @@ def _estimate_arclength(centroid_col, centroid_row):
 
 
 
-def _get_matrices(visit):
+def _get_matrices(visit, npoly=2):
     """ Make a design matrix for each channel """
     arclength = _estimate_arclength(visit.xshift, visit.yshift)
     arclength = arclength[:, None, None] * np.ones(visit.shape)
 
     a = arclength[:, :, 0].ravel()[:, None]
+    a -= np.median(a)
     b = visit.Y[:, :, 0].ravel()[:, None]
     c = visit.T[:, :, 0].ravel()[:, None]
     d = (visit.bkg[:, None] * np.ones((visit.nt, visit.nsp))).ravel()[:, None]
@@ -791,23 +561,33 @@ def _get_matrices(visit):
     c /= c.std()
     d /= d.std()
 
-    X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
-                   a, b, c, c**2, d,
-                   (a * b),
-                   a**2, b**2, a**2*b, a*b**2, a**2*b**2])
+    if npoly == 2:
+        X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                       a, b, #c, c**2, d
+                       (a * b),
+                       a**2, b**2, a**2*b, a*b**2, a**2*b**2
+                       ])
+    elif npoly == 3:
+        X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                       a, b, #d,
+                       (a * b),
+                       a**2, b**2, a**2*b, a*b**2, a**2*b**2,
+                       a**3, b**3, a**3*b, a**3*b**2, a*b**3, a**2*b**3, a**3*b**3])
+    else:
+        raise ValueError("Can not process that npoly yet.")
 
-    prior_sigma = np.ones(X.shape[1]) * 0.5
+    prior_sigma = np.ones(X.shape[1]) * 0.1
     prior_mu = np.zeros(X.shape[1])
     prior_mu[0] = 1
     return X, prior_mu, prior_sigma
 
 
 
-def _make_dict(obs):
+def _make_dict(obs, npoly=2):
     ''' Make a dictionary of the data from all the visits '''
     d = {k: [] for k in ['Xs', 'Trs', 'prior_mu', 'prior_sigma', 'wavelengths', 'visit_numbers', 'data', 'error', 'times']}
     for idx, visit in enumerate(obs):
-        X, prior_mu, prior_sigma = _get_matrices(visit)
+        X, prior_mu, prior_sigma = _get_matrices(visit, npoly=npoly)
         d['Xs'].append(X)
         d['prior_mu'].append(prior_mu)
         d['prior_sigma'].append(prior_sigma)
@@ -821,16 +601,16 @@ def _make_dict(obs):
         frames_err = (frames_err/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
         frames = (frames/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
 
-        avg = (np.average(frames, axis=2, weights=1/frames_err))
-        std = (np.average((frames - avg[:, :, None])**2, axis=2, weights=1/frames_err))**0.5
-        std /= visit.nwav**0.5
-
-        bad = (np.abs(avg - 1)/std > 5)[:, :, None] * np.ones(visit.shape, bool)
-
-        mask = ((frames)/frames_err) > 1
-        mask &= ~visit.cosmic_rays
-        mask &= (np.abs(visit.Y) < -visit.Y[0][2][0])
-        mask &= ~bad
+        # avg = (np.average(frames, axis=2, weights=1/frames_err))
+        # std = (np.average((frames - avg[:, :, None])**2, axis=2, weights=1/frames_err))**0.5
+        # std /= visit.nwav**0.5
+        #
+        # bad = (np.abs(avg - 1)/std > 5)[:, :, None] * np.ones(visit.shape, bool)
+        #
+        # mask = ((frames)/frames_err) > 1
+        # mask &= ~visit.cosmic_rays
+        mask = (np.abs(visit.Y) < -visit.Y[0][2][0])
+        # mask &= ~bad
 
         frames_err[~mask] = 1e10
         if visit.filters[0] == 'G141':
@@ -847,10 +627,10 @@ def _make_dict(obs):
 
 
 
-def fit_transmission_spectrum(obs, wav_grid1, wav_grid2):
+def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2):
     td = np.zeros(len(wav_grid1)) * np.nan
     tde = np.zeros(len(wav_grid1)) * np.nan
-    dic = _make_dict(obs)
+    dic = _make_dict(obs, npoly=npoly)
     model = [np.copy(dat1) * np.nan for dat1 in dic['data']]
 
     ws = np.hstack(dic['wavelengths'])
@@ -894,7 +674,7 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2):
         prior_sigma = np.hstack(prior_sigma)
         Xl = sparse.hstack([Xl, tr[:, None]], format='csr')
         prior_mu = np.append(prior_mu, 0)
-        prior_sigma = np.append(prior_sigma, 0.1)
+        prior_sigma = np.append(prior_sigma, 0.05)
 
         sigma_w_inv = Xl.T.dot(Xl/e[:, None]**2)
         sigma_w_inv += np.diag(1/prior_sigma**2)
@@ -902,6 +682,7 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2):
         B += prior_mu/prior_sigma**2
         w = np.linalg.solve(sigma_w_inv, B)
 
+#        import pdb;pdb.set_trace()
         werr = np.linalg.inv(np.asarray(sigma_w_inv)).diagonal()**0.5
         td[wdx] = w[-1]
         tde[wdx] = werr[-1]
@@ -920,15 +701,14 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2):
                 model[vdx][:, :, vm] = m[ldx + kdx].reshape(model[vdx][:, :, vm].shape)
             ldx += 1 + kdx
 
-
     for vdx, visit in enumerate(obs):
         m = ((visit.vsr_mean + visit.vsr_grad) * visit.average_lc[:, None, None] * visit.spec_mean) * model[vdx]
         frames = visit.data / m
         frames_err = visit.error / m
-        m *= np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0))
+#        m *= np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0))
         visit.partial_model = m
 
-    depth = 1 - obs.wl_map_soln['no_limb'].min()
+    depth = 1 - obs.model_lc_no_ld.min()
 
 
     obs.wav_grid = np.vstack([wav_grid1, wav_grid2]).mean(axis=0)
