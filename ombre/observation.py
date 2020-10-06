@@ -102,7 +102,7 @@ class Visit(object):
 
         self.error[self.error/self.data > 0.1] = 1e10
 
-        self.vsr_grad = fit_vsr_slant_easy(self)
+        self.vsr_mean, self.vsr_grad = fit_vsr_slant(self)
 
         m = (self.spec_mean * (self.vsr_mean + (self.vsr_grad)) * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         med = np.median(self.data - m, axis=0)[None, :, :]
@@ -122,7 +122,7 @@ class Visit(object):
 
         self.error += self.cosmic_rays * 1e10
 
-        self.vsr_grad = fit_vsr_slant_easy(self)
+        self.vsr_mean, self.vsr_grad = fit_vsr_slant(self)
 
 
         w = np.ones(observation.sci[s].shape)
@@ -612,7 +612,7 @@ class Observation(object):
             self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
 
         for visit in self:
-            visit.vsr_mean, visit.vsr_grad = fit_vsr_slant_full(visit)
+            visit.vsr_mean, visit.vsr_grad = fit_vsr_slant(visit)
     #    break
 
     def fit_transmission_spectrum(self, sample=True, npoly=3):

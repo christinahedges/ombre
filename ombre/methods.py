@@ -305,6 +305,7 @@ def _build_X(obs, frames, frames_err, spectrum=True, transit=True, spectrum_offs
         # Build spectral dimension
         def _make_A(obs, npoly):
 
+
             xshift = obs.xshift
             xshift -= np.mean(xshift)
             xshift /= (np.max(xshift) - np.min(xshift))
@@ -843,6 +844,54 @@ def fit_transmission_spectrum(obs, npoly=3):
         sigma_ws.append(np.diag(sigma_w)**0.5)
 
     return ts, ts_err, models, partial_models, ws, sigma_ws, X, prior_sigma, prior_mu
+
+
+
+def _estimate_arclength(centroid_col, centroid_row):
+    """Estimate the arclength given column and row centroid positions.
+    We use the approximation that the arclength equals
+        (row**2 + col**2)**0.5
+    For this to work, row and column must be correlated not anticorrelated.
+    """
+    col = centroid_col - np.nanmin(centroid_col)
+    row = centroid_row  - np.nanmin(centroid_row)
+    # Force c to be correlated not anticorrelated
+    if np.polyfit(col.data, row.data, 1)[0] < 0:
+        col = np.nanmax(col) - col
+    return (col**2 + row**2)**0.5
+
+def fit_vsr_slant(visit):
+
+    k = np.abs(visit.X) < -visit.X[0][0][5]
+    weights = np.copy(1/visit.error)
+    weights[~k] = 0
+
+    m = visit.average_lc[:, None, None] * visit.spec_mean
+    frames = visit.data / m
+    frames_err = visit.error / m
+    if hasattr(visit, 'model_lc_no_ld'):
+        frames_err = (frames_err/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
+        frames = (frames/np.average(frames[visit.model_lc_no_ld == 1], weights=1/frames_err[visit.model_lc_no_ld == 1], axis=(0)))
+    else:
+        frames_err = (frames_err/np.average(frames, weights=1/frames_err, axis=(0)))
+        frames = (frames/np.average(frames, weights=1/frames_err, axis=(0)))
+
+    X = np.vstack([visit.X[0][0]**0, visit.X[0][0], visit.X[0][0]**2, visit.X[0][0]**3]).T
+    model = np.zeros_like(visit.data)
+    prior_sigma = np.ones(4) * 10
+    prior_mu = np.asarray([1, 0, 0, 0])
+
+    for tdx in range(visit.nt):
+        for idx in range(visit.nsp):
+            sigma_w_inv = X[k[tdx][idx]].T.dot(X[k[tdx][idx]]/frames_err[tdx][idx][k[tdx][idx], None]**2)
+            sigma_w_inv += np.diag(1/prior_sigma**2)
+            B = X[k[tdx][idx]].T.dot(frames[tdx][idx][k[tdx][idx]]/frames_err[tdx][idx][k[tdx][idx]]**2)
+            B += prior_mu/prior_sigma**2
+            model[tdx][idx] = X.dot(np.linalg.solve(sigma_w_inv, B))
+
+    vsr_mean = np.mean(model, axis=2)[:, : ,None] * np.ones(visit.shape)
+    vsr_grad = model - vsr_mean
+    return vsr_mean, vsr_grad
 
 
 def fit_vsr_slant_easy(visit):
