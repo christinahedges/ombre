@@ -650,10 +650,25 @@ class Observation(object):
 
     def fit_transmission_spectrum(self, npoly=2):
 
-        # make the wavelength grid...
-        w1, w2 = np.asarray(pd.read_csv(PACKAGEDIR + '/data/wav_grid.csv')).T
-        #w1, w2 = w1[::nb], w2[nb-1::nb]
-        fit_transmission_spectrum(self, w1, w2, npoly=npoly)
+        wav_grid = []
+        for filter in ['G102', 'G141']:
+            w = []
+            for visit in self:
+                if visit.filters[0] == filter:
+                    w.append(visit.wavelength)
+
+            if len(w) == 0:
+                continue
+            w = np.sort(np.hstack(w))
+            if filter == 'G141':
+                w = w[(w >= 11250) & (w <= 16500)]
+            else:
+                w = w[(w >= 7800) & (w <= 11300)]
+            nv = np.sum([v.filters[0] == filter for v in self])
+            w = w[::nv]
+            wav_grid.append(w)
+        wav_grid = np.hstack(wav_grid)
+        fit_transmission_spectrum(self, wav_grid[:-1], wav_grid[1:], npoly=npoly)
 
 
     @property

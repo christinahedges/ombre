@@ -547,11 +547,10 @@ def _estimate_arclength(centroid_col, centroid_row):
 
 def _get_matrices(visit, npoly=2):
     """ Make a design matrix for each channel """
-    arclength = _estimate_arclength(visit.xshift, visit.yshift)
+    arclength = (visit.xshift - np.mean(visit.xshift))/(visit.xshift.max() - visit.xshift.min())
     arclength = arclength[:, None, None] * np.ones(visit.shape)
 
     a = arclength[:, :, 0].ravel()[:, None]
-    a -= np.median(a)
     b = visit.Y[:, :, 0].ravel()[:, None]
     c = visit.T[:, :, 0].ravel()[:, None]
     d = (visit.bkg[:, None] * np.ones((visit.nt, visit.nsp))).ravel()[:, None]
@@ -561,24 +560,49 @@ def _get_matrices(visit, npoly=2):
     c /= c.std()
     d /= d.std()
 
+
+    if npoly == 0:
+        X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                       ])
+
+    if npoly == 1:
+        X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                       a, b, a*b,
+                       ])
+
     if npoly == 2:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
-                       a, b, #c, c**2, d
-                       (a * b),
-                       a**2, b**2, a**2*b, a*b**2, a**2*b**2
+                       a, b, a*b,
+                       a**2, b**2, a**2*b, a*b**2, a**2*b**2,
                        ])
     elif npoly == 3:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
-                       a, b, #d,
-                       (a * b),
+                       a, b, a*b,
                        a**2, b**2, a**2*b, a*b**2, a**2*b**2,
-                       a**3, b**3, a**3*b, a**3*b**2, a*b**3, a**2*b**3, a**3*b**3])
-    else:
-        raise ValueError("Can not process that npoly yet.")
+                       a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3
+                       ])
+    elif npoly == 4:
+        X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                       a, b, a*b,
+                       a**2, b**2, a**2*b, a*b**2, a**2*b**2,
+                       a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3,
+                       a**4, a**4*b, a**4*b**2, a**4*b**3, a**4*b**4, a**3*b**4, a**2*b**4, a*b**4, b**4
+                       ])
+    elif npoly == 5:
+        X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                       a, b, a*b,
+                       a**2, b**2, a**2*b, a*b**2, a**2*b**2,
+                       a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3,
+                       a**4, a**4*b, a**4*b**2, a**4*b**3, a**4*b**4, a**3*b**4, a**2*b**4, a*b**4, b**4,
+                       a**5, a**5*b, a**5*b**2, a**5*b**3, a**5*b**4, a**5*b**5, a**4*b**5, a**3*b**5, a**2*b**5, a*b**5, b**5
+                       ])
 
+    else:
+        print(npoly)
     prior_sigma = np.ones(X.shape[1]) * 0.1
     prior_mu = np.zeros(X.shape[1])
     prior_mu[0] = 1
+    print(X.shape)
     return X, prior_mu, prior_sigma
 
 
@@ -711,6 +735,6 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2):
     depth = 1 - obs.model_lc_no_ld.min()
 
 
-    obs.wav_grid = np.vstack([wav_grid1, wav_grid2]).mean(axis=0)
+    obs.wav_grid = waxis
     obs.transmission_spec = td * depth * 1e6
     obs.transmission_spec_err = tde * depth * 1e6
