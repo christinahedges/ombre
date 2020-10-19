@@ -13,6 +13,7 @@ import logging
 from scipy import sparse
 import pickle
 import pandas as pd
+import functools
 
 from astropy.io import fits
 from astropy.time import Time
@@ -191,7 +192,9 @@ class Visit(object):
         lc = np.average((self.data/self.model), weights=(self.model/self.error), axis=(1, 2))
         return lc
 
+
     @property
+    @functools.lru_cache()
     def average_lc_errors(self):
         s = np.random.normal(self.data, self.error, size=(30, *self.shape))
         yerr = np.std([np.average(s1, weights=1/self.error, axis=(1, 2)) for s1 in s], axis=0)

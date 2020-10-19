@@ -43,7 +43,7 @@ def fit_transit(x, y, yerr, A, r_val, t0_val, period_val, inc_val, r_star, m_sta
         ror = pm.Deterministic("ror", r / r_star_pm)
 #        b = xo.ImpactParameter("b", ror=ror)
         if fit_inc:
-            inc = pm.Normal('inc', mu=inc_val, sd=0.01)
+            inc = pm.Normal('inc', mu=inc_val, sd=0.1)
         else:
             inc = inc_val
 
@@ -70,6 +70,7 @@ def fit_transit(x, y, yerr, A, r_val, t0_val, period_val, inc_val, r_star, m_sta
         sigma_w_inv = tt.dot(A.T, A/yerr[:, None]**2)
         B = tt.dot(A.T, (y - (light_curve * normalization))/yerr**2)
         w = tt.slinalg.solve(sigma_w_inv, B)
+
         noise_model = pm.Deterministic('noise_model', tt.dot(A, w))
 
         no_limb = pm.Deterministic('no_limb', pm.math.sum(xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(orbit=orbit, r=r, t=x, texp=exptime), axis=-1) + 1)
@@ -82,7 +83,8 @@ def fit_transit(x, y, yerr, A, r_val, t0_val, period_val, inc_val, r_star, m_sta
             model_suppl = (light_curve_suppl * norm_suppl)
             pm.Normal("obs", mu=tt.concatenate([model_suppl, full_model]), sd=tt.concatenate([yerr_suppl, yerr]), observed=(tt.concatenate([y_suppl, y])))
 
-        map_soln = xo.optimize(start=None, verbose=False)
+        map_soln = xo.optimize(start=model.test_point, verbose=False)
+
         if sample:
             trace = xo.sample(
                 tune=200, draws=1000, start=map_soln, chains=4, target_accept=0.95
@@ -122,12 +124,15 @@ def fit_white_light(obs, no_fit=False, fit_period=True, fit_t0=True, fit_inc=Fal
     ones = X([x1**0 for x1 in xs])
     hook = X([-np.exp(-300 * (t1 - t1[0])) for t1 in t])
     hook2 = X([-np.exp(-100 * (t1 - t1[0])) for t1 in t])
+    #hook = np.hstack([X([((t1 - t1[0]) * (t1 < t1[0] + 0.04)) for t1 in t]),
+#                      X([((t1 - t1[0]) * (t1 < t1[0] + 0.04))**2 for t1 in t]),
+#                      X([((t1 - t1[0]) * (t1 < t1[0] + 0.04))**3 for t1 in t]),
+#                      X([((t1 - t1[0]) * (t1 < t1[0] + 0.04))**4 for t1 in t])])
 
-    A = np.hstack([hook, hook2, xshift, background, background**2, ones, orbit, orbit**2, star, star**2])
+    A = np.hstack([hook, hook2, xshift, background, ones, orbit, orbit**2, star, star**2])
     # Hacky garbage
     A = np.nan_to_num(A)
     A = np.asarray(A)
-
     if supplement is not None:
         if not isinstance(supplement, lk.LightCurve):
             raise TypeError('Pass a lightkurve object for the supplement keyword')
@@ -138,14 +143,15 @@ def fit_white_light(obs, no_fit=False, fit_period=True, fit_t0=True, fit_inc=Fal
     else:
         x_suppl, y_suppl, yerr_suppl, exptime_suppl = np.empty(0), np.empty(0), np.empty(0), np.empty(0)
 
+
+    model_lc = obs.sys.flux(x).eval()
+    if model_lc.sum() == 0:
+        warnings.warn('No transit detected')
+
+    prior_sigma = np.hstack([hook[0]**0, hook2[0]**0, xshift[0]**0, background[0]**0, ones[0]**0, orbit[0]**0, orbit[0]**0, star[0]**0, star[0]**0, 1])
+    prior_mu = np.hstack([hook[0]*0, hook2[0]*0, xshift[0]*0, background[0]*0, ones[0]**0, orbit[0]*0, orbit[0]*0, star[0]*0, star[0]*0, 0])
+
     if no_fit:
-        model_lc = obs.sys.flux(x).eval()
-        if model_lc.sum() == 0:
-            warnings.warn('No transit detected')
-
-        prior_sigma = np.hstack([hook[0]**0, hook2[0]**0, xshift[0]**0, background[0]**0, background[0]**0, ones[0]**0, orbit[0]**0, orbit[0]**0, star[0]**0, star[0]**0, 1])
-        prior_mu = np.hstack([hook[0]*0, hook2[0]*0, xshift[0]*0, background[0]*0, background[0]*0, ones[0]**0, orbit[0]*0, orbit[0]*0, star[0]*0, star[0]*0, 0])
-
         A1 = np.hstack([A, model_lc[:, None] - 1])
         sigma_w_inv = A1.T.dot(A1/yerr[:, None]**2)
         sigma_w_inv += np.diag(1/prior_sigma**2)
@@ -153,45 +159,49 @@ def fit_white_light(obs, no_fit=False, fit_period=True, fit_t0=True, fit_inc=Fal
         B += prior_mu/prior_sigma**2
         w = np.linalg.solve(sigma_w_inv, B)
 
+    #    plt.plot(x, y)
+    #    plt.plot(x, A.dot(w[:-1]))
+
+
         obs.model_lc = (model_lc[np.argsort(x)] - 1) * w[-1] + 1
         obs.model_lc_no_ld = (model_lc[np.argsort(x)] - 1) * w[-1] + 1
         obs.depth = -np.min(w[-1] * (model_lc - 1))
-        obs.noise_model = A.dot(w[:-1])
+        obs.noise_model = A1[:, :-1].dot(w[:-1])
         for idx, visit in enumerate(obs):
             visit.model_lc = (model_lc[np.in1d(x, t[idx])] - 1) * w[-1] + 1
             visit.model_lc_no_ld = (model_lc[np.in1d(x, t[idx])] - 1) * w[-1] + 1
             visit.noise_model = obs.noise_model[np.in1d(x, t[idx])]
+        return
 
+    r = fit_transit(x, y, yerr, A,
+                        r_val=obs.sys.secondaries[0].r.eval(),
+                        t0_val=obs.sys.secondaries[0].t0.eval(), period_val=obs.sys.secondaries[0].porb.eval(),
+                        inc_val=np.deg2rad(obs.sys.secondaries[0].inc.eval()),
+                        r_star=obs.sys.primary.r.eval(), m_star=obs.sys.primary.m.eval(), exptime=np.median(obs.exptime) / (3600 * 24),
+                        x_suppl=x_suppl, y_suppl=y_suppl, yerr_suppl=yerr_suppl, exptime_suppl=exptime_suppl,
+                        fit_period=fit_period, fit_t0=fit_t0, sample=sample, fit_inc=fit_inc)
+
+    if sample:
+        map_soln, trace = r
+        obs.wl_map_soln = map_soln
+        obs.trace = trace
     else:
-        r = fit_transit(x, y, yerr, A,
-                            r_val=obs.sys.secondaries[0].r.eval(),
-                            t0_val=obs.sys.secondaries[0].t0.eval(), period_val=obs.sys.secondaries[0].porb.eval(),
-                            inc_val=np.deg2rad(obs.sys.secondaries[0].inc.eval()),
-                            r_star=obs.sys.primary.r.eval(), m_star=obs.sys.primary.m.eval(), exptime=np.median(obs.exptime) / (3600 * 24),
-                            x_suppl=x_suppl, y_suppl=y_suppl, yerr_suppl=yerr_suppl, exptime_suppl=exptime_suppl,
-                            fit_period=fit_period, fit_t0=fit_t0, sample=sample, fit_inc=fit_inc)
+        map_soln = r
+        obs.wl_map_soln = map_soln
 
-        if sample:
-            map_soln, trace = r
-            obs.wl_map_soln = map_soln
-            obs.trace = trace
-        else:
-            map_soln = r
-            obs.wl_map_soln = map_soln
+    obs.model_lc = map_soln['light_curve']
+    obs.model_lc_no_ld = map_soln['no_limb']
+    obs.depth = (map_soln['r']/map_soln['r_star'])**2
+    obs.noise_model = (map_soln['noise_model'] + 1) * map_soln['normalization']
+    for idx, visit in enumerate(obs):
+        visit.model_lc = obs.model_lc[np.in1d(x, t[idx])]
+        visit.model_lc_no_ld = obs.model_lc[np.in1d(x, t[idx])]
+        visit.noise_model = obs.noise_model[np.in1d(x, t[idx])]
 
-        obs.model_lc = map_soln['light_curve']
-        obs.model_lc_no_ld = map_soln['no_limb']
-        obs.depth = (map_soln['r']/map_soln['r_star'])**2
-        obs.noise_model = (map_soln['noise_model'] + 1) * map_soln['normalization']
-        for idx, visit in enumerate(obs):
-            visit.model_lc = obs.model_lc[np.in1d(x, t[idx])]
-            visit.model_lc_no_ld = obs.model_lc[np.in1d(x, t[idx])]
-            visit.noise_model = obs.noise_model[np.in1d(x, t[idx])]
-
-        if 'period' in map_soln:
-            obs.sys.secondaries[0].porb = map_soln['period']
-        if 'inc' in map_soln:
-            obs.sys.secondaries[0].inc = np.rad2deg(map_soln['inc'])
-        if 't0' in map_soln:
-            obs.sys.secondaries[0].t0 = map_soln['t0']
-        obs.sys.secondaries[0].r = map_soln['r']
+    if 'period' in map_soln:
+        obs.sys.secondaries[0].porb = map_soln['period']
+    if 'inc' in map_soln:
+        obs.sys.secondaries[0].inc = np.rad2deg(map_soln['inc'])
+    if 't0' in map_soln:
+        obs.sys.secondaries[0].t0 = map_soln['t0']
+    obs.sys.secondaries[0].r = map_soln['r']
