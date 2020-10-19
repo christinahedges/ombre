@@ -6,3 +6,4 @@ PACKAGEDIR = os.path.abspath(os.path.dirname(__file__))
 from .version import __version__
 from .observation import *
 from .methods import *
+from .transit import *

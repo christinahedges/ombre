@@ -14,6 +14,8 @@ from scipy import sparse
 import pickle
 import pandas as pd
 
+import functools
+
 from astropy.io import fits
 from astropy.time import Time
 from astropy.stats import sigma_clip, sigma_clipped_stats
@@ -22,6 +24,7 @@ from astropy.convolution import convolve, Box2DKernel
 from astroquery.mast import Observations as astropyObs
 
 from .methods import *
+from .transit import fit_white_light
 from . import PACKAGEDIR
 
 from starry.extensions import from_nexsci
@@ -73,6 +76,8 @@ class Visit(object):
         self.mask, self.spectral, self.spatial = simple_mask(observation.sci[s],
                                                              filter=self.filters[0])
 
+
+        self.scan = self.spatial[0].sum() > 7
         self.flat = np.ones((1, *observation.sci[s].shape[1:]))
         for count in [0, 1]:
             # We do this twice to improve the averages and flat field estimate
@@ -80,56 +85,61 @@ class Visit(object):
             self.error = (observation.err[s]/self.flat)[:, self.spatial.reshape(-1)][:, :, self.spectral.reshape(-1)]
             self.nt, self.nsp, self.nwav = self.data.shape
             self.shape = self.data.shape
+            if not hasattr(self, 'model'):
+                self.model = np.ones(self.shape)
+                T = (np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])).transpose([1, 0, 2])
+                T -= self.time[0]
+                self.T = (T/T.max() - 0.5)
 
-            self.vsr_mean = average_vsr(self)
-            self.spec_mean = average_spectrum(self)
-            self.model = self.spec_mean * self.vsr_mean
-            self.model /= np.atleast_3d(self.model.mean(axis=(1, 2))).transpose([1, 0, 2])
-            self.model_err = np.zeros(self.model.shape)
-            if count == 0:
-                self.flat = get_flatfield(observation, self, self.model)
+                Y, X = np.mgrid[:self.shape[1], :self.shape[2]]
+                Y = Y/(self.shape[1] - 1) - 0.5
+                X = X/(self.shape[2] - 1) - 0.5
+
+                self.X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(self.data.shape)
+                self.Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.data.shape)
 
 
 
+#            self.vsr_mean = average_vsr(self)
+#            self.spec_mean = average_spectrum(self)
+#            self.model = self.spec_mean * self.vsr_mean
+#            self.model /= np.atleast_3d(self.model.mean(axis=(1, 2))).transpose([1, 0, 2])
+#            self.model_err = np.zeros(self.model.shape)
+#            if count == 0:
+#                self.flat = get_flatfield(observation, self, self.model)
 
-        T = (np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])).transpose([1, 0, 2])
-        T -= self.time[0]
-        self.T = (T/T.max() - 0.5)
-
-        Y, X = np.mgrid[:self.shape[1], :self.shape[2]]
-        Y = Y/(self.shape[1] - 1) - 0.5
-        X = X/(self.shape[2] - 1) - 0.5
-
-        self.X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(self.data.shape)
-        self.Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.data.shape)
-
+#            import pdb;pdb.set_trace()
+            self.model = simple_model(self)
+            break
 
         self.error[self.error/self.data > 0.1] = 1e10
 
-        self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
+#        self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
 
-        m = (self.spec_mean * (self.vsr_mean + (self.vsr_grad)) * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        m = (self.model * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
         med = np.median(self.data - m, axis=0)[None, :, :]
         m += med
 
         # Ignore a 2 pixel border when looking for cosmics
-        k = (np.abs(self.Y) > -self.Y[0][2][0])
-        k |= (np.abs(self.X) > -self.X[0][0][2])
+        k = (np.abs(self.X) > -self.X[0][0][2])
+        if self.scan:
+            k |= (np.abs(self.Y) > -self.Y[0][2][0])
 
         res = np.ma.masked_array(self.data - m, k)
 
-        cmr = sigma_clip(res, axis=0, sigma_upper=6, sigma_lower=0).mask
-        cmr &= ~k
-        cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
-
-        self.cosmic_rays = cmr
-
+        if self.scan:
+            cmr = sigma_clip(res, axis=0, sigma_upper=6, sigma_lower=0).mask
+            cmr &= ~k
+            cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
+            self.cosmic_rays = cmr
+        else:
+            self.cosmic_rays = np.zeros(self.data.shape, bool)
         self.error += self.cosmic_rays * 1e10
 
-        self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
+#        self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
 
 
-        m = (self.vsr_mean + self.vsr_grad) * self.average_lc[:, None, None] * self.spec_mean
+        m = self.model * self.average_lc[:, None, None]
         frames = self.data / m
         frames_err = self.error / m
         frames_err = (frames_err/np.average(frames, weights=1/frames_err, axis=(0)))
@@ -146,6 +156,9 @@ class Visit(object):
         mask &= ~bad
 
         self.error[~mask] = 1e10
+
+        self.model = simple_model(self)
+
 
         w = np.ones(observation.sci[s].shape)
         w[observation.err[s]/observation.sci[s] > 0.1] = 1e10
@@ -191,6 +204,7 @@ class Visit(object):
         return lc
 
     @property
+    @functools.lru_cache()
     def average_lc_errors(self):
         s = np.random.normal(self.data, self.error, size=(30, *self.shape))
         yerr = np.std([np.average(s1, weights=1/self.error, axis=(1, 2)) for s1 in s], axis=0)
@@ -198,11 +212,11 @@ class Visit(object):
 
     @property
     def raw_average_lc(self):
-        return np.average((self.data/self.spec_mean), weights=(self.spec_mean/self.error), axis=(1, 2))
+        return np.average((self.data/self.model), weights=(self.model/self.error), axis=(1, 2))
 
     @property
     def raw_channel_lcs(self):
-        return np.average((self.data/self.spec_mean), weights=(self.spec_mean/self.error), axis=(1))
+        return np.average((self.data/self.model), weights=(self.model/self.error), axis=(1))
 
     @property
     def residuals(self):
@@ -218,7 +232,10 @@ class Visit(object):
         frames_err = (frames_err/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
         frames = (frames/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
 
-        k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+        if self.scan:
+            k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+        else:
+            k = ~self.cosmic_rays
 
         v = np.max(np.abs(np.nanpercentile(frames - 1, [3, 97])))
 
@@ -236,8 +253,10 @@ class Visit(object):
         frames_err = (frames_err/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
         frames = (frames/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
 
-        k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
-
+        if self.scan:
+            k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+        else:
+            k =  ~self.cosmic_rays
         a = np.average(np.nan_to_num(frames), weights=k.astype(float)/frames_err, axis=1).T - 1
         v = np.max(np.abs(np.nanpercentile(a, [3, 97])))
 
@@ -601,54 +620,18 @@ class Observation(object):
         return '{} (WFC3 Observation)'.format(self.name)
 
 
-    def fit_transit(self, sample=True, fit_period=True, t0_val=None, period_val=None, r_val=None, r_star_val=None):
-        t = [v.time for v in self.visits]
-        lcs = [v.average_lc/v.average_lc.mean() for v in self.visits]
-        lcs_err = [v.average_lc_errors/v.average_lc.mean() for v in self.visits]
-        orbits = [v.orbits for v in self.visits]
-        xs = [v.xshift for v in self.visits]
-        bkg = [v.bkg for v in self.visits]
+    def fit_transit(self, no_fit=False, fit_period=True, fit_t0=True, fit_inc=False, sample=False, supplement=None, t0_val=None, period_val=None):
 
-        if t0_val is None:
-            t0_val = self.sys.secondaries[0].t0.eval()
-        if period_val is None:
-            period_val = self.sys.secondaries[0].porb.eval()
-        if r_val is None:
-            r_val = self.sys.primary.r.eval()
-        if r_star_val is None:
-            r_star_val = self.sys.primary.r.eval()
-
-        r = fit_transit(t=t, lcs=lcs, lcs_err=lcs_err, orbits=orbits, xshift=xs, background=bkg,
-                        r=self.sys.secondaries[0].r.eval(),
-                        t0_val=t0_val,
-                        period_val=period_val,
-                        r_star=r_star_val,
-                        m_star=self.sys.primary.m.eval(),
-                        exptime=np.median(self.exptime) / (3600 * 24),
-                        sample=sample, fit_period=fit_period)
-        if sample:
-            self.wl_map_soln = r[0]
-            self.trace = r[1]
-        else:
-            self.wl_map_soln = r
-
-        if 'period' in self.wl_map_soln:
-            self.sys.secondaries[0].porb = self.wl_map_soln['period']
-        self.sys.secondaries[0].t0 = self.wl_map_soln['t0']
-
-        self.model_lc = self.wl_map_soln['light_curve']
-        self.model_lc_no_ld = self.wl_map_soln['no_limb']
-
-        model_lc = [self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])] for idx in range(len(t))]
-        for idx in range(len(t)):
-            self[idx].model_lc = self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])]
-            self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
-
-        for visit in self:
-            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
+        fit_white_light(self, no_fit=no_fit, fit_period=fit_period, fit_t0=fit_t0, fit_inc=fit_inc,
+                        sample=sample, supplement=supplement, t0_val=t0_val, period_val=period_val)
+#        for visit in self:
+#            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
     #    break
+#        self.model = simple_model(self)
 
-    def fit_transmission_spectrum(self, npoly=2):
+
+
+    def fit_transmission_spectrum(self, npoly=3):
 
         wav_grid = []
         for filter in ['G102', 'G141']:
@@ -818,9 +801,12 @@ class Observation(object):
         #        break
         channel_lcs = []
         for visit in self:
-            m = ((visit.vsr_mean + (visit.vsr_grad))* np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
+            m = visit.model * np.atleast_3d(visit.average_lc).transpose([1, 0, 2])
             res = (visit.data / m - visit.partial_model)
-            k = ((np.abs(visit.Y) < -visit.Y[0][2][0])) * ~visit.cosmic_rays
+            if visit.scan:
+                k = ((np.abs(visit.Y) < -visit.Y[0][2][0])) * ~visit.cosmic_rays
+            else:
+                k = ~visit.cosmic_rays
             a = (np.sum(res * k, axis=1)/np.sum(k, axis=1)).T
             channel_lcs.append(a)
 
@@ -859,7 +845,7 @@ class Observation(object):
             fig.savefig('{}/{}/channel_lcs_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
             plt.close(fig)
             fig, ax = plt.subplots()
-            ax.plot(visit.wavelength, visit.spec_mean[0][0]/np.median(visit.spec_mean[0][0]), label='Data', c='k')
+            ax.plot(visit.wavelength, average_spectrum(visit)[0][0]/np.median(average_spectrum(visit)[0][0]), label='Data', c='k')
             ax.plot(visit.wavelength, visit.sensitivity_t, label='Detector Sensitivity', c='r')
             ax.set(xlabel=('Wavelength [A]'), yticks=[])
             plt.legend()
