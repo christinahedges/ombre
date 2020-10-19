@@ -22,6 +22,7 @@ from astropy.convolution import convolve, Box2DKernel
 from astroquery.mast import Observations as astropyObs
 
 from .methods import *
+from .transit import fit_white_light
 from . import PACKAGEDIR
 
 from starry.extensions import from_nexsci
@@ -601,52 +602,15 @@ class Observation(object):
         return '{} (WFC3 Observation)'.format(self.name)
 
 
-    def fit_transit(self, sample=True, fit_period=True, t0_val=None, period_val=None, r_val=None, r_star_val=None):
-        t = [v.time for v in self.visits]
-        lcs = [v.average_lc/v.average_lc.mean() for v in self.visits]
-        lcs_err = [v.average_lc_errors/v.average_lc.mean() for v in self.visits]
-        orbits = [v.orbits for v in self.visits]
-        xs = [v.xshift for v in self.visits]
-        bkg = [v.bkg for v in self.visits]
 
-        if t0_val is None:
-            t0_val = self.sys.secondaries[0].t0.eval()
-        if period_val is None:
-            period_val = self.sys.secondaries[0].porb.eval()
-        if r_val is None:
-            r_val = self.sys.primary.r.eval()
-        if r_star_val is None:
-            r_star_val = self.sys.primary.r.eval()
+    def fit_transit(self, no_fit=False, fit_period=True, fit_t0=True, fit_inc=False, sample=False, supplement=None, t0_val=None, period_val=None):
 
-        r = fit_transit(t=t, lcs=lcs, lcs_err=lcs_err, orbits=orbits, xshift=xs, background=bkg,
-                        r=self.sys.secondaries[0].r.eval(),
-                        t0_val=t0_val,
-                        period_val=period_val,
-                        r_star=r_star_val,
-                        m_star=self.sys.primary.m.eval(),
-                        exptime=np.median(self.exptime) / (3600 * 24),
-                        sample=sample, fit_period=fit_period)
-        if sample:
-            self.wl_map_soln = r[0]
-            self.trace = r[1]
-        else:
-            self.wl_map_soln = r
-
-        if 'period' in self.wl_map_soln:
-            self.sys.secondaries[0].porb = self.wl_map_soln['period']
-        self.sys.secondaries[0].t0 = self.wl_map_soln['t0']
-
-        self.model_lc = self.wl_map_soln['light_curve']
-        self.model_lc_no_ld = self.wl_map_soln['no_limb']
-
-        model_lc = [self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])] for idx in range(len(t))]
-        for idx in range(len(t)):
-            self[idx].model_lc = self.wl_map_soln['light_curve'][np.in1d(np.hstack(t), t[idx])]
-            self[idx].model_lc_no_ld = self.wl_map_soln['no_limb'][np.in1d(np.hstack(t), t[idx])]
-
-        for visit in self:
-            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
+        fit_white_light(self, no_fit=no_fit, fit_period=fit_period, fit_t0=fit_t0, fit_inc=fit_inc,
+                        sample=sample, supplement=supplement, t0_val=t0_val, period_val=period_val)
+#        for visit in self:
+#            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
     #    break
+#        self.model = simple_model(self)
 
     def fit_transmission_spectrum(self, npoly=2):
 

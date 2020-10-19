@@ -555,6 +555,8 @@ def _get_matrices(visit, npoly=2):
     c = visit.T[:, :, 0].ravel()[:, None]
     d = (visit.bkg[:, None] * np.ones((visit.nt, visit.nsp))).ravel()[:, None]
 
+    h = -np.exp(-100 * (c - c.min()))
+
     a /= a.std()
     b /= b.std()
     c /= c.std()
@@ -563,30 +565,40 @@ def _get_matrices(visit, npoly=2):
 
     if npoly == 0:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
+                        h,
+                        d, d**2,
                        ])
 
     if npoly == 1:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
                        a, b, a*b,
+                        h,
+                        d, d**2,
                        ])
 
     if npoly == 2:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
                        a, b, a*b,
                        a**2, b**2, a**2*b, a*b**2, a**2*b**2,
+                        h,
+                        d, d**2,
                        ])
     elif npoly == 3:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
                        a, b, a*b,
                        a**2, b**2, a**2*b, a*b**2, a**2*b**2,
-                       a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3
+                       a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3,
+                        h,
+                        d, d**2,
                        ])
     elif npoly == 4:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
                        a, b, a*b,
                        a**2, b**2, a**2*b, a*b**2, a**2*b**2,
                        a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3,
-                       a**4, a**4*b, a**4*b**2, a**4*b**3, a**4*b**4, a**3*b**4, a**2*b**4, a*b**4, b**4
+                       a**4, a**4*b, a**4*b**2, a**4*b**3, a**4*b**4, a**3*b**4, a**2*b**4, a*b**4, b**4,
+                        h,
+                        d, d**2,
                        ])
     elif npoly == 5:
         X = np.hstack([np.ones(visit.nt*visit.nsp)[:, None],
@@ -594,7 +606,9 @@ def _get_matrices(visit, npoly=2):
                        a**2, b**2, a**2*b, a*b**2, a**2*b**2,
                        a**3, a**3*b, a**3*b**2, a**3*b**3, a**2*b**3, a*b**3, b**3,
                        a**4, a**4*b, a**4*b**2, a**4*b**3, a**4*b**4, a**3*b**4, a**2*b**4, a*b**4, b**4,
-                       a**5, a**5*b, a**5*b**2, a**5*b**3, a**5*b**4, a**5*b**5, a**4*b**5, a**3*b**5, a**2*b**5, a*b**5, b**5
+                       a**5, a**5*b, a**5*b**2, a**5*b**3, a**5*b**4, a**5*b**5, a**4*b**5, a**3*b**5, a**2*b**5, a*b**5, b**5,
+                        h,
+                        d, d**2,
                        ])
 
     else:
@@ -602,7 +616,6 @@ def _get_matrices(visit, npoly=2):
     prior_sigma = np.ones(X.shape[1]) * 0.1
     prior_mu = np.zeros(X.shape[1])
     prior_mu[0] = 1
-    print(X.shape)
     return X, prior_mu, prior_sigma
 
 
