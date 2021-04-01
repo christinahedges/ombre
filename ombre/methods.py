@@ -1120,7 +1120,7 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2, visits="all"):
                     np.hstack(
                         [
                             visit.hdrs[0][key]
-                            for visit in obs1
+                            for visit in obs
                             if (visit.visit_number in visits)
                             & (visit.direction == "forward")
                         ]

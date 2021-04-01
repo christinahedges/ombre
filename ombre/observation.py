@@ -899,7 +899,8 @@ class Observation(object):
             ts, es = fit_transmission_spectrum(
                 self, wav_grid[:-1], wav_grid[1:], npoly=npoly, visits=visits
             )
-            return Spectra([ts], name=self.name), Spectra([es], name=self.name)
+
+            ts, es = Spectra([ts], name=self.name), Spectra([es], name=self.name)
 
         else:
             ts, es = [], []
@@ -909,7 +910,10 @@ class Observation(object):
                 )
                 ts.append(ts1)
                 es.append(es1)
-            return Spectra(ts, name=self.name), Spectra(es, name=self.name)
+            ts, es = Spectra(ts, name=self.name), Spectra(es, name=self.name)
+        self.transmission_spec = ts
+        self.emission_spec = es
+        return ts, es
 
     @property
     def average_lc(self):
@@ -1110,6 +1114,8 @@ class Observation(object):
         if output is None:
             output = f"{self.name}_output.p"
         pickle.dump(r, open(output, "wb"))
+        self.transmission_spec.hdulist.write(f"{self.name}_transmission.fits")
+        self.emission_spec.hdulist.write(f"{self.name}_emission.fits")
 
     def save(self, dir="results"):
         if not os.path.isdir("{}/{}".format(dir, self.name)):
@@ -1161,6 +1167,28 @@ class Observation(object):
             "{}/{}/average_lc_all.png".format(dir, self.name),
             bbox_inches="tight",
             dpi=200,
+        )
+        plt.close(fig)
+
+        fig, ax = plt.subplots()
+        _ = [
+            spec[spec.spec_err < 1e5].plot(ax=ax, alpha=0.5)
+            for spec in self.transmission_spec
+        ]
+        ax.set_title(self.name)
+        fig.savefig(
+            "{}/{}/ts_all.png".format(dir, self.name), bbox_inches="tight", dpi=200
+        )
+        plt.close(fig)
+
+        fig, ax = plt.subplots()
+        _ = [
+            spec[spec.spec_err < 1e5].plot(ax=ax, alpha=0.5)
+            for spec in self.emission_spec
+        ]
+        ax.set_title(self.name)
+        fig.savefig(
+            "{}/{}/es_all.png".format(dir, self.name), bbox_inches="tight", dpi=200
         )
         plt.close(fig)
 
