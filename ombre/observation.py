@@ -28,101 +28,140 @@ from . import PACKAGEDIR
 
 from starry.extensions import from_nexsci
 
-log = logging.getLogger('ombre')
+log = logging.getLogger("ombre")
+
 
 class Visit(object):
-
-    def __init__(self, observation, visit_number, direction='forward', cadence_mask=None):
+    def __init__(
+        self, observation, visit_number, direction="forward", cadence_mask=None
+    ):
         if cadence_mask is None:
             cadence_mask = np.ones(observation.nt, bool)
 
         self.visit_number = visit_number
         self.name = observation.name
-
         s = np.copy(cadence_mask)
-        if (direction.lower() in ['f', 'fw', 'fwd', 'forward']):
+        if direction.lower() in ["f", "fw", "fwd", "forward"]:
             s &= (observation.visit_number == visit_number) & (observation.forward)
-            self.direction = 'forward'
-        elif (direction.lower() in ['b', 'bw', 'bwd', 'backward', 'back']):
+            self.direction = "forward"
+        elif direction.lower() in ["b", "bw", "bwd", "backward", "back"]:
             s &= (observation.visit_number == visit_number) & (~observation.forward)
-            self.direction = 'backward'
+            self.direction = "backward"
         else:
-            raise ValueError('No direction {}'.format(direction))
+            raise ValueError("No direction {}".format(direction))
 
         if not (observation.exptime[s] == np.median(observation.exptime[s])).all():
-           warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((observation.exptime[s] != np.median(observation.exptime[s])).sum(), len(observation.exptime[s])))
-
+            warnings.warn(
+                "Not all files have the same exposure time. {}/{} files will be discarded.".format(
+                    (observation.exptime[s] != np.median(observation.exptime[s])).sum(),
+                    len(observation.exptime[s]),
+                )
+            )
         s &= observation.exptime == np.median(observation.exptime[s])
         self.cadence_mask = s
         orbits = observation.orbits[s]
         self.orbits = orbits[:, np.any(orbits, axis=0)]
 
         if s.sum() == 0:
-            raise ValueError('No valid cadences remaining.')
-        [setattr(self, key, getattr(observation, key)[s])
-            for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
-                        'postarg1', 'postarg2',
-                        'sun_alt', 'velocity_aberration', '_filenames', 'forward', 'crpix1', 'crpix2']
-                         if hasattr(observation, key)]
-        setattr(self, 'hdrs', [observation.hdrs[idx] for idx in np.where(s)[0]])
+            raise ValueError("No valid cadences remaining.")
+        [
+            setattr(self, key, getattr(observation, key)[s])
+            for key in [
+                "time",
+                "start_date",
+                "propid",
+                "exptime",
+                "filters",
+                "postarg1",
+                "postarg2",
+                "sun_alt",
+                "velocity_aberration",
+                "_filenames",
+                "forward",
+                "crpix1",
+                "crpix2",
+            ]
+            if hasattr(observation, key)
+        ]
+        setattr(self, "hdrs", [observation.hdrs[idx] for idx in np.where(s)[0]])
 
         self.propid = self.propid[0]
-        [setattr(self, key, getattr(observation, key))
-            for key in ['ra', 'dec']
-                         if hasattr(observation, key)]
+        [
+            setattr(self, key, getattr(observation, key))
+            for key in ["ra", "dec"]
+            if hasattr(observation, key)
+        ]
 
+        sci = np.asarray([observation.sci[s1] for s1 in np.where(s)[0]])
+        err = np.asarray([observation.err[s1] for s1 in np.where(s)[0]])
+        self.dq = np.asarray([observation.dq[s1] for s1 in np.where(s)[0]])
+        self.ns = sci.shape[1]
+        if self.ns == 1024:
+            self.ns = 1014
 
-        self.mask, self.spectral, self.spatial = simple_mask(observation.sci[s],
-                                                             filter=self.filters[0])
+        self.mask, self.spectral, self.spatial = simple_mask(
+            sci, filter=self.filters[0]
+        )
 
-        self.flat = np.ones((1, *observation.sci[s].shape[1:]))
+        self.flat = np.ones((1, *sci.shape[1:]))
         for count in [0, 1]:
             # We do this twice to improve the averages and flat field estimate
-            self.data = (observation.sci[s]/self.flat)[:, self.spatial.reshape(-1)][:, :, self.spectral.reshape(-1)]
-            self.error = (observation.err[s]/self.flat)[:, self.spatial.reshape(-1)][:, :, self.spectral.reshape(-1)]
+            self.data = (sci / self.flat)[:, self.spatial.reshape(-1)][
+                :, :, self.spectral.reshape(-1)
+            ]
+            self.error = (err / self.flat)[:, self.spatial.reshape(-1)][
+                :, :, self.spectral.reshape(-1)
+            ]
             self.nt, self.nsp, self.nwav = self.data.shape
             self.shape = self.data.shape
 
             self.vsr_mean = average_vsr(self)
             self.spec_mean = average_spectrum(self)
             self.model = self.spec_mean * self.vsr_mean
-            self.model /= np.atleast_3d(self.model.mean(axis=(1, 2))).transpose([1, 0, 2])
+            self.model /= np.atleast_3d(self.model.mean(axis=(1, 2))).transpose(
+                [1, 0, 2]
+            )
             self.model_err = np.zeros(self.model.shape)
             if count == 0:
                 self.flat = get_flatfield(observation, self, self.model)
 
-
-
-
-        T = (np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])).transpose([1, 0, 2])
+        T = (
+            np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])
+        ).transpose([1, 0, 2])
         T -= self.time[0]
-        self.T = (T/T.max() - 0.5)
+        self.T = T / T.max() - 0.5
 
-        Y, X = np.mgrid[:self.shape[1], :self.shape[2]]
-        Y = Y/(self.shape[1] - 1) - 0.5
-        X = X/(self.shape[2] - 1) - 0.5
+        Y, X = np.mgrid[: self.shape[1], : self.shape[2]]
+        Y = Y / (self.shape[1] - 1) - 0.5
+        X = X / (self.shape[2] - 1) - 0.5
 
         self.X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(self.data.shape)
         self.Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(self.data.shape)
 
-
-        self.error[self.error/self.data > 0.1] = 1e10
+        self.error[self.error / self.data > 0.1] = 1e10
 
         self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
 
-        m = (self.spec_mean * (self.vsr_mean + (self.vsr_grad)) * np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        m = (
+            self.spec_mean
+            * (self.vsr_mean + (self.vsr_grad))
+            * np.atleast_3d(self.average_lc).transpose([1, 0, 2])
+        )
         med = np.median(self.data - m, axis=0)[None, :, :]
         m += med
 
         # Ignore a 2 pixel border when looking for cosmics
-        k = (np.abs(self.Y) > -self.Y[0][2][0])
-        k |= (np.abs(self.X) > -self.X[0][0][2])
+        k = np.abs(self.X) > -self.X[0][0][2]
+        if self.spatial.sum() > 7:
+            k = np.abs(self.Y) > -self.Y[0][2][0]
 
         res = np.ma.masked_array(self.data - m, k)
 
         cmr = sigma_clip(res, axis=0, sigma_upper=6, sigma_lower=0).mask
         cmr &= ~k
-        cmr |= np.asarray([(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr])
+        cmr |= np.asarray(
+            [(np.asarray(np.gradient(c.astype(float))) != 0).any(axis=0) for c in cmr]
+        )
 
         self.cosmic_rays = cmr
 
@@ -130,53 +169,73 @@ class Visit(object):
 
         self.vsr_mean, self.vsr_grad = get_vsr_slant(self)
 
-
-        m = (self.vsr_mean + self.vsr_grad) * self.average_lc[:, None, None] * self.spec_mean
+        m = (
+            (self.vsr_mean + self.vsr_grad)
+            * self.average_lc[:, None, None]
+            * self.spec_mean
+        )
         frames = self.data / m
         frames_err = self.error / m
-        frames_err = (frames_err/np.average(frames, weights=1/frames_err, axis=(0)))
-        frames = (frames/np.average(frames, weights=1/frames_err, axis=(0)))
+        frames_err = frames_err / np.average(frames, weights=1 / frames_err, axis=(0))
+        frames = frames / np.average(frames, weights=1 / frames_err, axis=(0))
 
-        avg = (np.average(frames, axis=2, weights=1/frames_err))
-        std = (np.average((frames - avg[:, :, None])**2, axis=2, weights=1/frames_err))**0.5
-        std /= self.nwav**0.5
+        avg = np.average(frames, axis=2, weights=1 / frames_err)
+        std = (
+            np.average((frames - avg[:, :, None]) ** 2, axis=2, weights=1 / frames_err)
+        ) ** 0.5
+        std /= self.nwav ** 0.5
 
-        bad = (np.abs(avg - 1)/std > 5)[:, :, None] * np.ones(self.shape, bool)
+        bad = (np.abs(avg - 1) / std > 5)[:, :, None] * np.ones(self.shape, bool)
 
-        mask = ((frames)/frames_err) > 1
+        mask = ((frames) / frames_err) > 1
         mask &= ~self.cosmic_rays
         mask &= ~bad
 
         self.error[~mask] = 1e10
 
-        w = np.ones(observation.sci[s].shape)
-        w[observation.err[s]/observation.sci[s] > 0.1] = 1e10
+        w = np.ones(sci.shape)
+        w[err / sci > 0.1] = 1e10
 
         larger_mask = convolve(self.mask[0], Box2DKernel(21)) > 1e-5
 
-        thumb = np.average(observation.sci[s], weights=1/observation.err[s], axis=0)
-        thumb = thumb[:, np.where(larger_mask.any(axis=0))[0][0]:np.where(larger_mask.any(axis=0))[0][-1] + 1]
-        thumb = thumb[np.where(larger_mask.any(axis=1))[0][0]:np.where(larger_mask.any(axis=1))[0][-1] + 1, :]
+        thumb = np.average(sci, weights=1 / err, axis=0)
+        thumb = thumb[
+            :,
+            np.where(larger_mask.any(axis=0))[0][0] : np.where(larger_mask.any(axis=0))[
+                0
+            ][-1]
+            + 1,
+        ]
+        thumb = thumb[
+            np.where(larger_mask.any(axis=1))[0][0] : np.where(larger_mask.any(axis=1))[
+                0
+            ][-1]
+            + 1,
+            :,
+        ]
         self.trace = np.mean(thumb, axis=0)
-        self.trace_mask = (larger_mask.any(axis=0) & ~self.mask[0].any(axis=0))[larger_mask.any(axis=0)]
+        self.trace_mask = (larger_mask.any(axis=0) & ~self.mask[0].any(axis=0))[
+            larger_mask.any(axis=0)
+        ]
 
-        Y, X = np.mgrid[:observation.sci[s].shape[1], :observation.sci[s].shape[2]]
-        X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(observation.sci[s].shape)
-        Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(observation.sci[s].shape)
-        w1 = (observation.sci[s]/w)[:, larger_mask]
-        w1 = (w1.T/w1.mean(axis=1)).T
+        Y, X = np.mgrid[: sci.shape[1], : sci.shape[2]]
+        X = np.atleast_3d(X).transpose([2, 0, 1]) * np.ones(sci.shape)
+        Y = np.atleast_3d(Y).transpose([2, 0, 1]) * np.ones(sci.shape)
+        w1 = (sci / w)[:, larger_mask]
+        w1 = (w1.T / w1.mean(axis=1)).T
         xshift = np.mean(X[:, larger_mask] * w1, axis=1)
         self.xshift = xshift - np.median(xshift)
         yshift = np.mean(Y[:, larger_mask] * w1, axis=1)
         self.yshift = yshift - np.median(yshift)
 
-
-        #m1 = convolve((observation.sci[s] < 5).any(axis=0), Box2DKernel(20), boundary='fill', fill_value=1) < 0.9
+        # m1 = convolve((observation.sci[s] < 5).any(axis=0), Box2DKernel(20), boundary='fill', fill_value=1) < 0.9
         m1 = larger_mask
-        m = m1 | (observation.err[s]/observation.sci[s] > 0.5)
-        bkg = sigma_clipped_stats(ma.masked_array(observation.sci[s], m), axis=(1, 2), sigma=3)[1]
+        m = m1 | (err / sci > 0.5)
+        bkg = sigma_clipped_stats(ma.masked_array(sci, m), axis=(1, 2), sigma=3)[1]
         self.bkg = bkg - np.median(bkg)
 
+        self.sci = sci
+        self.err = err
 
         self.wavelength, self.sensitivity, self.sensitivity_t = calibrate(self)
         self.wavelength = self.wavelength[~self.trace_mask]
@@ -184,34 +243,46 @@ class Visit(object):
         self.sensitivity_t = self.sensitivity_t[~self.trace_mask]
 
     def __repr__(self):
-        return '{} Visit {}, {} [Proposal ID: {}]'.format(self.name, self.visit_number, self.direction, self.propid)
-
+        return "{} Visit {}, {} [Proposal ID: {}]".format(
+            self.name, self.visit_number, self.direction, self.propid
+        )
 
     @property
     def average_lc(self):
-        lc = np.average((self.data/self.model), weights=(self.model/self.error), axis=(1, 2))
+        lc = np.average(
+            (self.data / self.model), weights=(self.model / self.error), axis=(1, 2)
+        )
         return lc
-
 
     @property
     @functools.lru_cache()
     def average_lc_errors(self):
         s = np.random.normal(self.data, self.error, size=(30, *self.shape))
-        yerr = np.std([np.average(s1, weights=1/self.error, axis=(1, 2)) for s1 in s], axis=0)
+        yerr = np.std(
+            [np.average(s1, weights=1 / self.error, axis=(1, 2)) for s1 in s], axis=0
+        )
         return yerr
 
     @property
     def raw_average_lc(self):
-        return np.average((self.data/self.spec_mean), weights=(self.spec_mean/self.error), axis=(1, 2))
+        return np.average(
+            (self.data / self.spec_mean),
+            weights=(self.spec_mean / self.error),
+            axis=(1, 2),
+        )
 
     @property
     def raw_channel_lcs(self):
-        return np.average((self.data/self.spec_mean), weights=(self.spec_mean/self.error), axis=(1))
+        return np.average(
+            (self.data / self.spec_mean),
+            weights=(self.spec_mean / self.error),
+            axis=(1),
+        )
 
     @property
     def residuals(self):
-        r = (self.data / self.model)
-        r = (r.T - np.average(r, weights=self.model/self.error, axis=(1, 2))).T
+        r = self.data / self.model
+        r = (r.T - np.average(r, weights=self.model / self.error, axis=(1, 2))).T
         return r
 
     def animate_residuals(self, output=None):
@@ -219,56 +290,86 @@ class Visit(object):
         m = self.partial_model
         frames = self.data / m
         frames_err = self.error / m
-        frames_err = (frames_err/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
-        frames = (frames/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
+        frames_err = frames_err / np.average(
+            frames[self.model_lc_no_ld == 1],
+            weights=1 / frames_err[self.model_lc_no_ld == 1],
+            axis=(0),
+        )
+        frames = frames / np.average(
+            frames[self.model_lc_no_ld == 1],
+            weights=1 / frames_err[self.model_lc_no_ld == 1],
+            axis=(0),
+        )
 
-        k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+        k = frames_err < 1e8
 
         v = np.max(np.abs(np.nanpercentile(frames - 1, [3, 97])))
 
         if output is None:
-            output = f'{self.name}_resids.mp4'
-        animate(((frames - 1)/k), vmin=-v, vmax=v, cmap='coolwarm', output=output)
-
+            output = f"{self.name}_resids.mp4"
+        animate(((frames - 1) / k), vmin=-v, vmax=v, cmap="coolwarm", output=output)
 
     def plot_channel_lcs(self):
-        #m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
+        # m = ((self.vsr_mean + (self.vsr_grad))* np.atleast_3d(self.average_lc).transpose([1, 0, 2]))
 
         m = self.partial_model
         frames = self.data / m
         frames_err = self.error / m
-        frames_err = (frames_err/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
-        frames = (frames/np.average(frames[self.model_lc_no_ld == 1], weights=1/frames_err[self.model_lc_no_ld == 1], axis=(0)))
+        frames_err = frames_err / np.average(
+            frames[self.model_lc_no_ld == 1],
+            weights=1 / frames_err[self.model_lc_no_ld == 1],
+            axis=(0),
+        )
+        frames = frames / np.average(
+            frames[self.model_lc_no_ld == 1],
+            weights=1 / frames_err[self.model_lc_no_ld == 1],
+            axis=(0),
+        )
 
-        k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+        # k = ((np.abs(self.Y) < -self.Y[0][2][0])) * ~self.cosmic_rays
+        k = frames_err < 1e8
 
-        a = np.average(np.nan_to_num(frames), weights=k.astype(float)/frames_err, axis=1).T - 1
+        a = (
+            np.average(
+                np.nan_to_num(frames), weights=k.astype(float) / frames_err, axis=1
+            ).T
+            - 1
+        )
         v = np.max(np.abs(np.nanpercentile(a, [3, 97])))
 
         fig = plt.figure(figsize=(10, 10))
         ax = plt.subplot2grid((5, 1), (0, 0))
 
         self.plot_average_lc(ax=ax, model_lc=False)
-        ax.set(title=f'{self.__repr__()}', xlabel='')
+        ax.set(title=f"{self.__repr__()}", xlabel="")
 
         ax = plt.subplot2grid((5, 1), (1, 0), rowspan=4)
         dt = np.median(np.diff(self.time))
-        masks = [np.in1d(np.arange(self.nt), m)
-                    for m in np.array_split(np.arange(self.nt), np.where(np.append(0, np.diff(self.time)) > dt*1.5)[0])]
+        masks = [
+            np.in1d(np.arange(self.nt), m)
+            for m in np.array_split(
+                np.arange(self.nt),
+                np.where(np.append(0, np.diff(self.time)) > dt * 1.5)[0],
+            )
+        ]
         for m in masks:
-            plt.pcolormesh(self.time[m], self.wavelength, a[:, m], vmin=-v, vmax=v, cmap='PRGn')
+            plt.pcolormesh(
+                self.time[m], self.wavelength, a[:, m], vmin=-v, vmax=v, cmap="PRGn"
+            )
 
-        #bad = np.where(np.gradient(self.ts.mask.astype(float)) != 0)[0][::2]
-        #plt.fill_between(self.time, self.wavelength[0], self.wavelength[bad[0]], color='k', alpha=0.3)
-        #plt.fill_between(self.time, self.wavelength[bad[-1]], self.wavelength[-1], color='k', alpha=0.3)
+        # bad = np.where(np.gradient(self.ts.mask.astype(float)) != 0)[0][::2]
+        # plt.fill_between(self.time, self.wavelength[0], self.wavelength[bad[0]], color='k', alpha=0.3)
+        # plt.fill_between(self.time, self.wavelength[bad[-1]], self.wavelength[-1], color='k', alpha=0.3)
 
-        cbar = plt.colorbar(orientation='horizontal')
-        cbar.set_label('$\delta$ Transit Depth')
-        ax.set(xlim = (self.time[0] - 0.01, self.time[-1] + 0.01), xlabel='Time [BKJD]', ylabel='Wavelength [A]')
+        cbar = plt.colorbar(orientation="horizontal")
+        cbar.set_label("$\delta$ Transit Depth")
+        ax.set(
+            xlim=(self.time[0] - 0.01, self.time[-1] + 0.01),
+            xlabel="Time [BKJD]",
+            ylabel="Wavelength [A]",
+        )
 
         return fig
-
-
 
     def plot_average_lc(self, ax=None, errors=False, labels=True, model_lc=True):
         if ax is None:
@@ -276,27 +377,31 @@ class Visit(object):
         else:
             ax1 = ax
 
-        if errors:
-            rlc, rlce = self.raw_average_lc, self.raw_average_lc_errors
-            lc, lce = self.average_lc, self.average_lc_errors
-            lce /= np.median(lc)
-            lc /= np.median(lc)
-            rlce /= np.median(rlc)
-            rlc /= np.median(rlc)
-            ax1.errorbar(self.time, rlc, rlce, ls='', c='r', label='Raw Light Curve')
-            ax1.errorbar(self.time, lc, lce, ls='', c='k', label='Corrected Light Curve')
+        # if errors:
+        #     rlc, rlce = self.raw_average_lc, self.raw_average_lc_errors
+        #     lc, lce = self.average_lc, self.average_lc_errors
+        #     lce /= np.median(lc)
+        #     lc /= np.median(lc)
+        #     rlce /= np.median(rlc)
+        #     rlc /= np.median(rlc)
+        #     ax1.errorbar(self.time, rlc, rlce, ls='', c='r', label='Raw Light Curve')
+        #     ax1.errorbar(self.time, lc, lce, ls='', c='k', label='Corrected Light Curve')
 
-        else:
-            rlc = self.raw_average_lc
-            lc = self.average_lc
-            lc /= np.median(lc)
-            rlc /= np.median(rlc)
-            ax1.scatter(self.time, rlc, c='r', marker='.', label='Raw Light Curve')
-            ax1.scatter(self.time, lc, c='k', marker='.', label='Corrected Light Curve')
-        ax1.set(xlabel='Time from Observation Start [d]', ylabel='Normalized Flux', title='Channel Averaged Light Curve')
+        #        else:
+        rlc = self.raw_average_lc / np.median(
+            self.raw_average_lc[(self.model_lc + self.eclipse_lc) == 1]
+        )
+        lc = self.average_lc / self.noise_model
+        ax1.scatter(self.time, rlc, c="r", marker=".", label="Raw Light Curve")
+        ax1.scatter(self.time, lc, c="k", marker=".", label="Corrected Light Curve")
+        ax1.set(
+            xlabel="Time from Observation Start [d]",
+            ylabel="Normalized Flux",
+            title="Channel Averaged Light Curve",
+        )
         t = np.linspace(self.time[0], self.time[-1], 1000)
-        if hasattr(self, 'model_lc') & model_lc:
-            ax1.scatter(self.time, self.model_lc)
+        if hasattr(self, "model_lc") & model_lc:
+            ax1.scatter(self.time, self.model_lc + self.eclipse_lc)
         if labels:
             ax1.legend()
         if ax is None:
@@ -305,42 +410,82 @@ class Visit(object):
             return ax1
 
     def plot_frame(self, frame=0):
-        fig = plt.figure(figsize=(10, 10*self.shape[1]/self.shape[2]))
+        fig = plt.figure(figsize=(10, 10 * self.shape[1] / self.shape[2]))
         ax = plt.subplot2grid((1, 3), (0, 0))
         v = np.percentile(self.data[frame], [1, 99])
-        im = ax.imshow(self.data[frame], vmin=v[0], vmax=v[1], cmap='viridis')
-        ax.set(xlabel='Wavelength Pixel', title='Data', xticklabels=[], yticklabels=[], ylabel='Spatial Pixel')
-        cbar = plt.colorbar(im, ax=ax, orientation='horizontal')
-        cbar.set_label('e$^-$/s')
+        im = ax.imshow(self.data[frame], vmin=v[0], vmax=v[1], cmap="viridis")
+        ax.set(
+            xlabel="Wavelength Pixel",
+            title="Data",
+            xticklabels=[],
+            yticklabels=[],
+            ylabel="Spatial Pixel",
+        )
+        cbar = plt.colorbar(im, ax=ax, orientation="horizontal")
+        cbar.set_label("e$^-$/s")
 
         ax = plt.subplot2grid((1, 3), (0, 1))
-        im = ax.imshow(self.model[frame] * self.data[frame].mean(), vmin=v[0], vmax=v[1], cmap='viridis')
-        ax.set(xlabel='Wavelength Pixel', title='Model', xticklabels=[], yticklabels=[])
-        cbar = plt.colorbar(im, ax=ax, orientation='horizontal')
-        cbar.set_label('e$^-$/s')
+        im = ax.imshow(
+            self.model[frame] * self.data[frame].mean(),
+            vmin=v[0],
+            vmax=v[1],
+            cmap="viridis",
+        )
+        ax.set(xlabel="Wavelength Pixel", title="Model", xticklabels=[], yticklabels=[])
+        cbar = plt.colorbar(im, ax=ax, orientation="horizontal")
+        cbar.set_label("e$^-$/s")
 
         ax = plt.subplot2grid((1, 3), (0, 2))
 
         res = self.residuals[frame]
         v = np.percentile(np.abs(res), 84)
-        im = ax.imshow(res, vmin=-v, vmax=v, cmap='coolwarm')
-        ax.set(xlabel='Wavelength Pixel', title='Residuals', xticklabels=[], yticklabels=[])
-        cbar = plt.colorbar(im, ax=ax, orientation='horizontal')
-        cbar.set_label('Residual')
+        im = ax.imshow(res, vmin=-v, vmax=v, cmap="coolwarm")
+        ax.set(
+            xlabel="Wavelength Pixel", title="Residuals", xticklabels=[], yticklabels=[]
+        )
+        cbar = plt.colorbar(im, ax=ax, orientation="horizontal")
+        cbar.set_label("Residual")
         plt.subplots_adjust(wspace=0.02)
         return fig
 
-class Observation(object):
 
+class Observation(object):
     def __init__(self, name):
         self.name = name
-        [setattr(self, key, None)
-                for key in ['time', 'start_date', 'propid', 'exptime', 'filters',
-                            'hdrs', 'postarg1', 'postarg2', 'visits',
-                            'sun_alt', 'velocity_aberration', '_filenames', 'sci',
-                            'err', 'dq', 'forward', 'orbits',
-                             'ra', 'dec', 'nt', 'ns', 'sys', 'bkg',
-                              'model_lc', 'model_lc_no_ld', 'wl_map_soln', 'trace', 'crpix1', 'crpix2']]
+        [
+            setattr(self, key, None)
+            for key in [
+                "time",
+                "start_date",
+                "propid",
+                "exptime",
+                "filters",
+                "hdrs",
+                "postarg1",
+                "postarg2",
+                "visits",
+                "sun_alt",
+                "velocity_aberration",
+                "_filenames",
+                "sci",
+                "err",
+                "dq",
+                "forward",
+                "orbits",
+                "ra",
+                "dec",
+                "nt",
+                "ns",
+                "sys",
+                "bkg",
+                "model_lc",
+                "model_lc_no_ld",
+                "wl_map_soln",
+                "trace",
+                "crpix1",
+                "crpix2",
+            ]
+        ]
 
     @staticmethod
     def from_file(filenames, propid=None, visit=None, name=None, t0=None):
@@ -353,41 +498,53 @@ class Observation(object):
         """
         self = Observation(None)
         if isinstance(filenames, str):
-            if not filenames.endswith('*'):
+            if not filenames.endswith("*"):
                 self.filenames = np.asarray(glob(filenames + "*"))
             else:
                 self.filenames = np.asarray(glob(filenames))
         else:
             self.filenames = np.asarray(filenames)
         if len(self.filenames) == 0:
-            raise ValueError('Must pass >0 `filenames`')
-        if not np.all([fname.endswith('_flt.fits') for fname in self.filenames]):
-            raise ValueError('`filenames` must all be `_flt.fits` files. e.g. {}'.format(self.filenames[0]))
+            raise ValueError("Must pass >0 `filenames`")
+        if not np.all([fname.endswith("_flt.fits") for fname in self.filenames]):
+            raise ValueError(
+                "`filenames` must all be `_flt.fits` files. e.g. {}".format(
+                    self.filenames[0]
+                )
+            )
 
         self.hdrs = [fits.getheader(file) for idx, file in enumerate(self.filenames)]
         if name is None:
-            self.name = np.asarray([hdr['TARGNAME'] for hdr in self.hdrs])
+            self.name = np.asarray([hdr["TARGNAME"] for hdr in self.hdrs])
         else:
             self.name = name
         if not len(np.unique(self.name)) == 1:
-            raise ValueError('Multiple targets in `filenames`.')
+            raise ValueError("Multiple targets in `filenames`.")
         self.name = np.unique(self.name)[0]
 
         try:
             self.sys = from_nexsci(self.name, limb_darkening=[0, 0])
         except ValueError:
-            raise ValueError('{} is not a recognized exoplanet name. Please pass a correct `name`.'.format(self.name))
+            raise ValueError(
+                "{} is not a recognized exoplanet name. Please pass a correct `name`.".format(
+                    self.name
+                )
+            )
         if t0 is not None:
             self.sys.secondaries[0].t0 = t0
 
+        self.filters = np.asarray([hdr["FILTER"] for hdr in self.hdrs])
+        mask = (self.filters == "G141") | (self.filters == "G102")
 
-        self.filters = np.asarray([hdr['FILTER'] for hdr in self.hdrs])
-        mask = (self.filters == 'G141') | (self.filters == 'G102')
-
-
-        convert_time = lambda hdr:(Time(datetime.strptime('{}-{}'.format(hdr['DATE-OBS'],
-                                                              hdr['TIME-OBS']), '%Y-%m-%d-%H:%M:%S')).jd,
-								   Time(datetime.strptime('{}'.format(hdr['DATE-OBS']), '%Y-%m-%d')).jd)
+        convert_time = lambda hdr: (
+            Time(
+                datetime.strptime(
+                    "{}-{}".format(hdr["DATE-OBS"], hdr["TIME-OBS"]),
+                    "%Y-%m-%d-%H:%M:%S",
+                )
+            ).jd,
+            Time(datetime.strptime("{}".format(hdr["DATE-OBS"]), "%Y-%m-%d")).jd,
+        )
 
         dimage_time = []
         dimage_x = []
@@ -399,85 +556,125 @@ class Observation(object):
 
         for f in self.filenames[~mask]:
             with fits.open(f) as hdu:
-                Y, X = np.mgrid[:hdu[1].data.shape[0], :hdu[1].data.shape[1]]
-                dimage_filter.append(hdu[0].header['FILTER'])
+                Y, X = np.mgrid[: hdu[1].data.shape[0], : hdu[1].data.shape[1]]
+                dimage_filter.append(hdu[0].header["FILTER"])
                 dimage_time.append(convert_time(hdu[0].header)[0])
                 w = hdu[1].data
                 cent = np.unravel_index(np.argmax(hdu[1].data), hdu[1].data.shape)
-                a = np.in1d(np.arange(hdu[1].data.shape[0]), np.arange(cent[0] - 5, cent[0] + 5))
-                b = np.in1d(np.arange(hdu[1].data.shape[1]), np.arange(cent[1] - 5, cent[1] + 5))
+                a = np.in1d(
+                    np.arange(hdu[1].data.shape[0]), np.arange(cent[0] - 5, cent[0] + 5)
+                )
+                b = np.in1d(
+                    np.arange(hdu[1].data.shape[1]), np.arange(cent[1] - 5, cent[1] + 5)
+                )
                 w *= (a[:, None] * b[None, :]).astype(float)
                 dimage_x.append(np.average(X, weights=w))
                 dimage_y.append(np.average(Y, weights=w))
-                dimage_crpix1.append(hdu[1].header['CRPIX1'])
-                dimage_crpix2.append(hdu[1].header['CRPIX2'])
+                dimage_crpix1.append(hdu[1].header["CRPIX1"])
+                dimage_crpix2.append(hdu[1].header["CRPIX2"])
                 dimage_filenames.append(f)
 
-        self.dimage_time, self.dimage_x, self.dimage_y = np.asarray(dimage_time), np.asarray(dimage_x), np.asarray(dimage_y)
+        self.dimage_time, self.dimage_x, self.dimage_y = (
+            np.asarray(dimage_time),
+            np.asarray(dimage_x),
+            np.asarray(dimage_y),
+        )
         self.dimage_filter = np.asarray(dimage_filter)
         self.dimage_crpix1 = np.asarray(dimage_crpix1)
         self.dimage_crpix2 = np.asarray(dimage_crpix2)
         self.dimage_filenames = np.asarray(dimage_filenames)
 
-
-        self.exptime = np.asarray([hdr['EXPTIME'] for hdr in self.hdrs])
-        #if not (self.exptime[mask] == np.median(self.exptime[mask])).all():
+        self.exptime = np.asarray([hdr["EXPTIME"] for hdr in self.hdrs])
+        # if not (self.exptime[mask] == np.median(self.exptime[mask])).all():
         #    warnings.warn('Not all files have the same exposure time. {}/{} files will be discarded.'.format((self.exptime[mask] != np.median(self.exptime[mask])).sum(), len(self.exptime[mask])))
-        #mask &= self.exptime == np.median(self.exptime)
+        # mask &= self.exptime == np.median(self.exptime)
 
-        self.propid = np.asarray([hdr['PROPOSID'] for hdr in self.hdrs])
+        self.propid = np.asarray([hdr["PROPOSID"] for hdr in self.hdrs])
         if propid is None:
             if len(np.unique(self.propid)) != 1:
-                warnings.warn('Data sets from multiple proposals have been passed ({})'.format(np.unique(self.propid)))
+                warnings.warn(
+                    "Data sets from multiple proposals have been passed ({})".format(
+                        np.unique(self.propid)
+                    )
+                )
         else:
             mask &= self.propid == propid
 
         if not mask.any():
-            raise ValueError('All cadences are masked.')
+            raise ValueError("All cadences are masked.")
 
-
-        self.time, self.start_date = np.asarray([convert_time(hdr) for hdr in self.hdrs]).T
+        self.time, self.start_date = np.asarray(
+            [convert_time(hdr) for hdr in self.hdrs]
+        ).T
         s = np.argsort(self.time)
-        [setattr(self, key, getattr(self, key)[s])
-                for key in ['time', 'start_date', 'propid', 'exptime', 'filters', 'filenames']]
+        [
+            setattr(self, key, getattr(self, key)[s])
+            for key in [
+                "time",
+                "start_date",
+                "propid",
+                "exptime",
+                "filters",
+                "filenames",
+            ]
+        ]
 
-        setattr(self, 'hdrs', [self.hdrs[idx] for idx in s])
+        setattr(self, "hdrs", [self.hdrs[idx] for idx in s])
 
         mask = mask[s]
 
-#        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 0.8)]
-#        self.nvisits = len(start_dates)
-#        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 0.8) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
+        #        start_dates = np.unique(self.start_date)[np.append(True, np.diff(np.unique(self.start_date)) > 0.8)]
+        #        self.nvisits = len(start_dates)
+        #        self.visit_number = np.vstack([(np.abs(self.start_date - s) < 0.8) * (idx + 1)  for idx, s in enumerate(start_dates)]).sum(axis=0)
 
         split = np.where(np.diff(self.time) > 0.5)[0] + 1
         self.nvisits = len(split) + 1
-        self.visit_number = np.hstack([np.ones(len(s), int) * (idx + 1) for idx, s in enumerate(np.array_split(self.time, split))])
+        self.visit_number = np.hstack(
+            [
+                np.ones(len(s), int) * (idx + 1)
+                for idx, s in enumerate(np.array_split(self.time, split))
+            ]
+        )
         if visit is not None:
-            #if visit > self.nvisits:
+            # if visit > self.nvisits:
             #    raise ValueError('Only {} visits available.'.format(self.nvisits))
             mask &= np.in1d(self.visit_number, visit)
-        self.time, self.start_date, self.visit_number, self.propid, self.exptime, self.filters =\
-            self.time[mask], self.start_date[mask], self.visit_number[mask], self.propid[mask],\
-            self.exptime[mask], self.filters[mask]
-        self.postarg1 = np.asarray([hdr['POSTARG1'] for hdr in self.hdrs])[mask]
-        self.postarg2 = np.asarray([hdr['POSTARG2'] for hdr in self.hdrs])[mask]
-        self.sun_alt = np.asarray([hdr['SUN_ALT'] for hdr in self.hdrs])[mask]
-        setattr(self, 'hdrs', [self.hdrs[idx] for idx in np.where(mask)[0]])
-#        self.hdrs = self.hdrs[mask]
+        (
+            self.time,
+            self.start_date,
+            self.visit_number,
+            self.propid,
+            self.exptime,
+            self.filters,
+        ) = (
+            self.time[mask],
+            self.start_date[mask],
+            self.visit_number[mask],
+            self.propid[mask],
+            self.exptime[mask],
+            self.filters[mask],
+        )
+        self.postarg1 = np.asarray([hdr["POSTARG1"] for hdr in self.hdrs])[mask]
+        self.postarg2 = np.asarray([hdr["POSTARG2"] for hdr in self.hdrs])[mask]
+        self.sun_alt = np.asarray([hdr["SUN_ALT"] for hdr in self.hdrs])[mask]
+        setattr(self, "hdrs", [self.hdrs[idx] for idx in np.where(mask)[0]])
+        #        self.hdrs = self.hdrs[mask]
 
-        self.ra = self.hdrs[0]['RA_TARG']
-        self.dec = self.hdrs[0]['DEC_TARG']
+        self.ra = self.hdrs[0]["RA_TARG"]
+        self.dec = self.hdrs[0]["DEC_TARG"]
         self.nt = np.sum(mask)
-        aperture = self.hdrs[0]['APERTURE']
-        self.ns = int(''.join([a for a in aperture if a.isnumeric()]))
-        if self.ns == 1024:
-            self.ns = 1014
+        aperture = self.hdrs[0]["APERTURE"]
         self._filenames = np.asarray(self.filenames)[mask]
         self.forward = self.postarg2 > 0
 
         self._load_data()
         orbits = np.where(np.append(0, np.diff(self.time)) > 0.015)[0]
-        self.orbits = np.asarray([np.in1d(np.arange(self.nt), o) for o in np.array_split(np.arange(self.nt), orbits)]).T
+        self.orbits = np.asarray(
+            [
+                np.in1d(np.arange(self.nt), o)
+                for o in np.array_split(np.arange(self.nt), orbits)
+            ]
+        ).T
 
         return self
 
@@ -486,42 +683,48 @@ class Observation(object):
             cadence_mask = np.ones(self.nt, bool)
         self.visits = []
         for idx in range(1, self.nvisits + 1):
-            for direction, mask in zip(['f', 'b'], [self.forward, ~self.forward]):
+            for direction, mask in zip(["f", "b"], [self.forward, ~self.forward]):
                 if mask.sum() == 0:
                     continue
                 try:
-                    self.visits.append(Visit(self, idx, direction, cadence_mask=cadence_mask))
+                    self.visits.append(
+                        Visit(self, idx, direction, cadence_mask=cadence_mask)
+                    )
                 except ValueError:
                     continue
 
-#        literature_calibrate(self)
+    #        literature_calibrate(self)
 
     def _load_data(self):
         """ Helper function to load in the data """
-        self.sci, self.err, self.dq = np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns), dtype=int)
+        #        self.sci, self.err, self.dq = np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns)), np.zeros((self.nt, self.ns, self.ns), dtype=int)
+        self.sci, self.err, self.dq = [], [], []
         self.velocity_aberration = np.zeros(self.nt)
         self.crpix1 = np.zeros(self.nt)
         self.crpix2 = np.zeros(self.nt)
-        for jdx, file in enumerate(self._filenames):
-            hdulist = fits.open(file)
-            self.sci[jdx], self.err[jdx], self.dq[jdx] = np.asarray([hdu.data for hdu in hdulist[1:4]])
-            if hdulist[1].header['BUNIT'] == 'ELECTRONS':
-                self.sci[jdx] /= hdulist[1].header['SAMPTIME']
-                self.err[jdx] /= hdulist[1].header['SAMPTIME']
-            self.velocity_aberration[jdx] = hdulist[1].header['VAFACTOR']
-            self.crpix1[jdx] = hdulist[1].header['CRPIX1']
-            self.crpix2[jdx] = hdulist[1].header['CRPIX2']
-
-            hdulist.close('all')
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
-        self.err[(self.dq & qmask) != 0] = 1e10
+
+        for jdx, file in enumerate(self._filenames):
+            with fits.open(file, cache=False, memmap=False) as hdulist:
+                #            self.sci[jdx], self.err[jdx], self.dq[jdx] = np.asarray([hdu.data for hdu in hdulist[1:4]])
+                self.sci.append(hdulist[1].data)
+                self.err.append(hdulist[2].data)
+                self.dq.append(hdulist[3].data)
+                if hdulist[1].header["BUNIT"] == "ELECTRONS":
+                    self.sci[jdx] /= hdulist[1].header["SAMPTIME"]
+                    self.err[jdx] /= hdulist[1].header["SAMPTIME"]
+
+                self.err[jdx][(self.dq[jdx] & qmask) != 0] = 1e10
+                self.velocity_aberration[jdx] = hdulist[1].header["VAFACTOR"]
+                self.crpix1[jdx] = hdulist[1].header["CRPIX1"]
+                self.crpix2[jdx] = hdulist[1].header["CRPIX2"]
 
     def __len__(self):
         return self.nt
 
     @property
     def shape(self):
-        return self.sci.shape
+        return len(self.sci)
 
     def copy(self):
         return deepcopy(self)
@@ -531,112 +734,182 @@ class Observation(object):
 
     @staticmethod
     def from_MAST(targetname, visit=None, direction=None, **kwargs):
-        """Download a target from MAST
-        """
-        def download_target(targetname, radius='10 arcsec'):
-            download_dir = os.path.join(os.path.expanduser('~'), '.ombre-cache')
+        """Download a target from MAST"""
+
+        def download_target(targetname, radius="10 arcsec"):
+            download_dir = os.path.join(os.path.expanduser("~"), ".ombre-cache")
             if not os.path.isdir(download_dir):
                 try:
                     os.mkdir(download_dir)
                 # downloads locally if OS error occurs
                 except OSError:
-                    log.warning('Warning: unable to create {}. '
-                                'Downloading MAST files to the current '
-                                'working directory instead.'.format(download_dir))
-                    download_dir = '.'
+                    log.warning(
+                        "Warning: unable to create {}. "
+                        "Downloading MAST files to the current "
+                        "working directory instead.".format(download_dir)
+                    )
+                    download_dir = "."
 
-            logging.getLogger('astropy').setLevel(log.getEffectiveLevel())
-            obsTable = astropyObs.query_criteria(target_name=targetname,
-                                                    obs_collection='HST',
-                                                    project='HST',
-                                                    radius=radius)
-            obsTable = obsTable[(obsTable['instrument_name'] == 'WFC3/IR') &
-                                (obsTable['dataRights'] == "PUBLIC")]
+            logging.getLogger("astropy").setLevel(log.getEffectiveLevel())
+            obsTable = astropyObs.query_criteria(
+                target_name=targetname,
+                obs_collection="HST",
+                project="HST",
+                radius=radius,
+            )
+            obsTable = obsTable[
+                (obsTable["instrument_name"] == "WFC3/IR")
+                & (obsTable["dataRights"] == "PUBLIC")
+            ]
 
-            fnames = ['{}/mastDownload/'.format(download_dir) +
-                        url.replace('mast:', '').replace('product', url.split('/')[-1].split('_')[0])[:-9] +
-                         '_flt.fits' for url in obsTable['dataURL']]
-            log.info('Found {} files.'.format(len(obsTable)))
+            fnames = [
+                "{}/mastDownload/".format(download_dir)
+                + url.replace("mast:", "").replace(
+                    "product", url.split("/")[-1].split("_")[0]
+                )[:-9]
+                + "_flt.fits"
+                for url in obsTable["dataURL"]
+            ]
+            log.info("Found {} files.".format(len(obsTable)))
             paths = []
-            for idx, t in enumerate(tqdm(obsTable, desc='Downloading files', total=len(obsTable))):
+            for idx, t in enumerate(
+                tqdm(obsTable, desc="Downloading files", total=len(obsTable))
+            ):
                 if os.path.isfile(fnames[idx]):
                     paths.append(fnames[idx])
                 else:
                     t1 = astropyObs.get_product_list(t)
-                    t1 = t1[t1['productSubGroupDescription'] == 'FLT']
-                    paths.append(astropyObs.download_products(t1, mrp_only=False, download_dir=download_dir)['Local Path'][0])
+                    t1 = t1[t1["productSubGroupDescription"] == "FLT"]
+                    paths.append(
+                        astropyObs.download_products(
+                            t1, mrp_only=False, download_dir=download_dir
+                        )["Local Path"][0]
+                    )
             return paths
 
         paths = np.asarray(download_target(targetname))
 
         if isinstance(visit, int):
-#            start_time = np.asarray([Time(datetime.strptime('{}'.format(fits.open(fname)[0].header['DATE-OBS']), '%Y-%m-%d')).jd for fname in paths])
+            #            start_time = np.asarray([Time(datetime.strptime('{}'.format(fits.open(fname)[0].header['DATE-OBS']), '%Y-%m-%d')).jd for fname in paths])
             hdrs = np.asarray([fits.getheader(file) for idx, file in enumerate(paths)])
 
-            convert_time = lambda hdr:(Time(datetime.strptime('{}-{}'.format(hdr['DATE-OBS'],
-                                                                  hdr['TIME-OBS']), '%Y-%m-%d-%H:%M:%S')).jd,
-    								   Time(datetime.strptime('{}'.format(hdr['DATE-OBS']), '%Y-%m-%d')).jd)
-
+            convert_time = lambda hdr: (
+                Time(
+                    datetime.strptime(
+                        "{}-{}".format(hdr["DATE-OBS"], hdr["TIME-OBS"]),
+                        "%Y-%m-%d-%H:%M:%S",
+                    )
+                ).jd,
+                Time(datetime.strptime("{}".format(hdr["DATE-OBS"]), "%Y-%m-%d")).jd,
+            )
 
             time, start_date = np.asarray([convert_time(hdr) for hdr in hdrs]).T
 
-#            start_dates = np.unique(start_date)[np.append(True, np.diff(np.unique(start_date)) > 1)]
+            #            start_dates = np.unique(start_date)[np.append(True, np.diff(np.unique(start_date)) > 1)]
             visits = np.unique(start_date, return_inverse=True)[1] + 1
             mask = visits == visit
             if not mask.any():
-                raise ValueError('No data in visit {}'.format(visit))
+                raise ValueError("No data in visit {}".format(visit))
             paths = paths[mask]
 
         if isinstance(direction, str):
-            directions = np.asarray([fits.open(fname)[0].header['POSTARG2'] for fname in paths])
-            if direction == 'forward':
+            directions = np.asarray(
+                [fits.open(fname)[0].header["POSTARG2"] for fname in paths]
+            )
+            if direction == "forward":
                 paths = paths[directions >= 0]
-            elif direction == 'backward':
+            elif direction == "backward":
                 paths = paths[directions <= 0]
             else:
-                raise ValueError("Can not parse direction {}. "
-                                    "Choose from `'forward'` or `'backward'`".format(direction))
+                raise ValueError(
+                    "Can not parse direction {}. "
+                    "Choose from `'forward'` or `'backward'`".format(direction)
+                )
         return Observation.from_file(paths, **kwargs)
 
     def __repr__(self):
         if self.visits is not None:
-            return ('{} (WFC3 Observation) \n\t'.format(self.name)
-            + '\n\t'.join([v.__repr__() for v in self.visits]))
-        return '{} (WFC3 Observation)'.format(self.name)
+            return "{} (WFC3 Observation) \n\t".format(self.name) + "\n\t".join(
+                [v.__repr__() for v in self.visits]
+            )
+        return "{} (WFC3 Observation)".format(self.name)
 
+    def fit_transit(
+        self,
+        no_fit=False,
+        fit_period=True,
+        fit_t0=True,
+        fit_inc=False,
+        sample=False,
+        supplement=None,
+        t0_val=None,
+        period_val=None,
+    ):
 
+        fit_white_light(
+            self,
+            no_fit=no_fit,
+            fit_period=fit_period,
+            fit_t0=fit_t0,
+            fit_inc=fit_inc,
+            sample=sample,
+            supplement=supplement,
+            t0_val=t0_val,
+            period_val=period_val,
+        )
 
-    def fit_transit(self, no_fit=False, fit_period=True, fit_t0=True, fit_inc=False, sample=False, supplement=None, t0_val=None, period_val=None):
-
-        fit_white_light(self, no_fit=no_fit, fit_period=fit_period, fit_t0=fit_t0, fit_inc=fit_inc,
-                        sample=sample, supplement=supplement, t0_val=t0_val, period_val=period_val)
-#        for visit in self:
-#            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
+    #        for visit in self:
+    #            visit.vsr_mean, visit.vsr_grad = get_vsr_slant(visit)
     #    break
-#        self.model = simple_model(self)
+    #        self.model = simple_model(self)
 
-    def fit_transmission_spectrum(self, npoly=2):
+    def fit_transmission_spectrum(self, npoly=2, visits="all", joint_fit=False):
+        if visits == "all":
+            visits = np.unique([visit.visit_number for visit in self])
+        if not hasattr(visits, "__iter__"):
+            visits = [visits]
+
+        for v in visits:
+            if v not in [visit.visit_number for visit in self]:
+                raise ValueError(f"No such visit as {v}")
 
         wav_grid = []
-        for filter in ['G102', 'G141']:
+        for filter in ["G102", "G141"]:
             w = []
             for visit in self:
+                if visit.visit_number not in visits:
+                    continue
                 if visit.filters[0] == filter:
                     w.append(visit.wavelength)
 
             if len(w) == 0:
                 continue
             w = np.sort(np.hstack(w))
-            if filter == 'G141':
+            if filter == "G141":
                 w = w[(w >= 11250) & (w <= 16500)]
             else:
                 w = w[(w >= 7800) & (w <= 11300)]
-            nv = np.sum([v.filters[0] == filter for v in self])
+            nv = np.sum(
+                [v.filters[0] == filter for v in self if v.visit_number in visits]
+            )
             w = w[::nv]
             wav_grid.append(w)
         wav_grid = np.hstack(wav_grid)
-        fit_transmission_spectrum(self, wav_grid[:-1], wav_grid[1:], npoly=npoly)
+        if joint_fit:
+            ts, es = fit_transmission_spectrum(
+                self, wav_grid[:-1], wav_grid[1:], npoly=npoly, visits=visits
+            )
+            return Spectra([ts], name=self.name), Spectra([es], name=self.name)
 
+        else:
+            ts, es = [], []
+            for visit in visits:
+                ts1, es1 = fit_transmission_spectrum(
+                    self, wav_grid[:-1], wav_grid[1:], npoly=npoly, visits=visit
+                )
+                ts.append(ts1)
+                es.append(es1)
+            return Spectra(ts, name=self.name), Spectra(es, name=self.name)
 
     @property
     def average_lc(self):
@@ -654,7 +927,6 @@ class Observation(object):
     def raw_channel_lcs(self):
         return [v.raw_channel_lcs for v in self.visits]
 
-
     def plot_average_lc(self, ax=None):
         if ax is None:
             fig, ax = plt.subplots()
@@ -669,22 +941,33 @@ class Observation(object):
         p = self.sys.secondaries[0].porb.eval()
         t = np.hstack([self[idx].time for idx in range(len(self.visits))])
         t_fold = (t - t0 + 0.5 * p) % p - 0.5 * p
-        mlc = (self.wl_map_soln['noise_model'] + (self.wl_map_soln['light_curve']** 0) * self.wl_map_soln['normalization'])
+        #        mlc = (self.wl_map_soln['noise_model'] + (self.wl_map_soln['light_curve']** 0) * self.wl_map_soln['normalization'])
+        mlc = np.hstack([v.model_lc for v in self])
         fig = plt.figure(figsize=(10, 4))
-        raw = np.hstack([v.average_lc/v.average_lc.mean() for v in self.visits])
-        corr = np.hstack([v.average_lc/v.average_lc.mean() for v in self.visits])/mlc
+        raw = np.hstack(
+            [
+                v.average_lc / v.average_lc[(v.model_lc + v.eclipse_lc) == 1].mean()
+                for v in self.visits
+            ]
+        )
+        corr = np.hstack([(v.average_lc / v.noise_model) for v in self.visits])
 
-        raw *= np.median(corr/raw)
-
-        plt.scatter(t_fold, raw, c='r', s=4, label='Raw Data')
-        plt.scatter(t_fold, corr, c='k', s=7, label='Corrected Data')
-        plt.scatter(t_fold, self.wl_map_soln['light_curve'], c='lime', s=3, label='Transit Model')
+        plt.scatter(t_fold, raw, c="r", s=4, label="Raw Data")
+        plt.scatter(t_fold, corr, c="k", s=7, label="Corrected Data")
+        plt.scatter(
+            t_fold,
+            self.wl_map_soln["light_curve"] + self.wl_map_soln["eclipse"],
+            c="lime",
+            s=3,
+            label="Transit Model",
+        )
         plt.xlabel("Time")
-        plt.ylabel('Normalized Flux')
+        plt.ylabel("Normalized Flux")
         plt.legend()
-        plt.title(f'{self.name}')
+        plt.title(f"{self.name}")
         return fig
-        #plt.scatter(t_fold, map_soln['light_curve'] * map_soln['normalization'], s=1, c='r')
+        # plt.scatter(t_fold, map_soln['light_curve'] * map_soln['normalization'], s=1, c='r')
+
     #
     # def plot_resids(self):
     #     fig = plt.figure(figsize=(10, 10))
@@ -785,70 +1068,132 @@ class Observation(object):
         #        break
         channel_lcs = []
         for visit in self:
-            m = ((visit.vsr_mean + (visit.vsr_grad))* np.atleast_3d(visit.average_lc).transpose([1, 0, 2]))
-            res = (visit.data / m - visit.partial_model)
-            k = ((np.abs(visit.Y) < -visit.Y[0][2][0])) * ~visit.cosmic_rays
-            a = (np.sum(res * k, axis=1)/np.sum(k, axis=1)).T
+            m = (visit.vsr_mean + (visit.vsr_grad)) * np.atleast_3d(
+                visit.average_lc
+            ).transpose([1, 0, 2])
+            res = visit.data / m - visit.partial_model
+            # k = ((np.abs(visit.Y) < -visit.Y[0][2][0])) * ~visit.cosmic_rays
+            k = visit.error < 1e8
+            a = (np.sum(res * k, axis=1) / np.sum(k, axis=1)).T
             channel_lcs.append(a)
 
-        r = {'name':self.name,
-             'time':self.time,
-             'flux':np.hstack(self.average_lc),
-             'flux_err':np.hstack(self.average_lc_errors),
-             'raw_flux':np.hstack(self.raw_average_lc),
-             'raw_flux_err':np.hstack(self.raw_average_lc),
-             'model_lc': self.model_lc,
-             'model_lc_no_ld':self.model_lc_no_ld,
-             'wavelength':self.wav_grid,
-             'transmission_spectrum':self.transmission_spec,
-             'transmission_spectrum_err':self.transmission_spec_err,
-             'yshift':np.hstack([v.yshift for v in self]),
-             'xshift':np.hstack([v.xshift for v in self]),
-             'wl_map_soln':self.wl_map_soln,
-             'channel_lcs':channel_lcs}
+        r = {
+            "name": self.name,
+            "time": self.time,
+            "flux": np.hstack(self.average_lc),
+            "flux_err": np.hstack(self.average_lc_errors),
+            "raw_flux": np.hstack(self.raw_average_lc),
+            "raw_flux_err": np.hstack(self.raw_average_lc),
+            "model_lc": self.model_lc,
+            "eclipse_lc": self.eclipse_lc,
+            "model_lc_no_ld": self.model_lc_no_ld,
+            #            "transmission_wavelength": self.wav_grid[self.transmission_spec_err < 1e5],
+            #            "transmission_spectrum": self.transmission_spec[
+            #                self.transmission_spec_err < 1e5
+            #            ],
+            # "transmission_spectrum_err": self.transmission_spec_err[
+            #     self.transmission_spec_err < 1e5
+            # ],
+            "depth": self.depth,
+            # "emission_wavelength": self.wav_grid[self.emission_spec_err < 1e5],
+            # "emission_spectrum": self.emission_spec[self.emission_spec_err < 1e5],
+            # "emission_spectrum_err": self.emission_spec_err[
+            #     self.emission_spec_err < 1e5
+            # ],
+            "eclipse_depth": self.eclipse_depth,
+            "yshift": np.hstack([v.yshift for v in self]),
+            "xshift": np.hstack([v.xshift for v in self]),
+            "wl_map_soln": self.wl_map_soln,
+            "channel_lcs": channel_lcs,
+        }
 
         if output is None:
-            output = f'{self.name}_output.p'
-        pickle.dump(r, open(output, 'wb'))
+            output = f"{self.name}_output.p"
+        pickle.dump(r, open(output, "wb"))
 
-
-
-    def save(self, dir='results'):
-        if not os.path.isdir('{}/{}'.format(dir, self.name)):
-            os.mkdir('{}/{}'.format(dir, self.name))
+    def save(self, dir="results"):
+        if not os.path.isdir("{}/{}".format(dir, self.name)):
+            os.mkdir("{}/{}".format(dir, self.name))
 
         for idx, visit in enumerate(self):
-            fig = visit.plot_average_lc();
-            fig.savefig('{}/{}/average_lc_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
+            fig = visit.plot_average_lc()
+            fig.savefig(
+                "{}/{}/average_lc_{}.png".format(dir, self.name, idx + 1),
+                bbox_inches="tight",
+                dpi=200,
+            )
             plt.close(fig)
-            visit.animate_residuals(output='{}/{}/residuals_{}.mp4'.format(dir, self.name, idx + 1))
-            fig = visit.plot_channel_lcs();
-            fig.savefig('{}/{}/channel_lcs_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
+            visit.animate_residuals(
+                output="{}/{}/residuals_{}.mp4".format(dir, self.name, idx + 1)
+            )
+            fig = visit.plot_channel_lcs()
+            fig.savefig(
+                "{}/{}/channel_lcs_{}.png".format(dir, self.name, idx + 1),
+                bbox_inches="tight",
+                dpi=200,
+            )
             plt.close(fig)
             fig, ax = plt.subplots()
-            ax.plot(visit.wavelength, visit.spec_mean[0][0]/np.median(visit.spec_mean[0][0]), label='Data', c='k')
-            ax.plot(visit.wavelength, visit.sensitivity_t, label='Detector Sensitivity', c='r')
-            ax.set(xlabel=('Wavelength [A]'), yticks=[])
+            ax.plot(
+                visit.wavelength,
+                visit.spec_mean[0][0] / np.median(visit.spec_mean[0][0]),
+                label="Data",
+                c="k",
+            )
+            ax.plot(
+                visit.wavelength,
+                visit.sensitivity_t,
+                label="Detector Sensitivity",
+                c="r",
+            )
+            ax.set(xlabel=("Wavelength [A]"), yticks=[])
             plt.legend()
             plt.title(visit.__repr__())
-            fig.savefig('{}/{}/wavelength_calibration_{}.png'.format(dir, self.name, idx + 1), bbox_inches='tight', dpi=200)
+            fig.savefig(
+                "{}/{}/wavelength_calibration_{}.png".format(dir, self.name, idx + 1),
+                bbox_inches="tight",
+                dpi=200,
+            )
             plt.close(fig)
 
-
-        fig = self.plot_transit_fit();
-        fig.savefig('{}/{}/average_lc_all.png'.format(dir, self.name), bbox_inches='tight', dpi=200)
+        fig = self.plot_transit_fit()
+        fig.savefig(
+            "{}/{}/average_lc_all.png".format(dir, self.name),
+            bbox_inches="tight",
+            dpi=200,
+        )
         plt.close(fig)
 
-#        for filter in np.unique(self.filters):
-        fig, ax = plt.subplots()
-        ax.errorbar(self.wav_grid, self.transmission_spec, self.transmission_spec_err, lw=0.5)
-        plt.title(self.name)
-        plt.xlabel('Wavelength [A]')
-        plt.ylabel('$\delta$ Transit Depth [ppm]')
-        fig.savefig('{}/{}/ts_all.png'.format(dir, self.name), bbox_inches='tight', dpi=200)
-        plt.close(fig)
+        # fig, ax = plt.subplots()
+        # k = self.transmission_spec_err < 1e5
+        # ax.errorbar(
+        #     self.wav_grid[k],
+        #     self.transmission_spec[k],
+        #     self.transmission_spec_err[k],
+        #     lw=0.5,
+        # )
+        # plt.title(self.name)
+        # plt.xlabel("Wavelength [A]")
+        # plt.ylabel("$\delta$ Transit Depth [ppm]")
+        # fig.savefig(
+        #     "{}/{}/ts_all.png".format(dir, self.name), bbox_inches="tight", dpi=200
+        # )
+        # plt.close(fig)
+        #
+        # fig, ax = plt.subplots()
+        # k = self.emission_spec_err < 1e5
+        # ax.errorbar(
+        #     self.wav_grid[k], self.emission_spec[k], self.emission_spec_err[k], lw=0.5
+        # )
+        # plt.title(self.name)
+        # plt.xlabel("Wavelength [A]")
+        # plt.ylabel("$\delta$ Eclipse Depth [ppm]")
+        # fig.savefig(
+        #     "{}/{}/es_all.png".format(dir, self.name), bbox_inches="tight", dpi=200
+        # )
+        # plt.close(fig)
 
-        self.write(output='{0}/{1}/{1}_results.p'.format(dir, self.name))
+        self.write(output="{0}/{1}/{1}_results.p".format(dir, self.name))
 
     # def correct(self):
     #     self.model = fit_data(self)
