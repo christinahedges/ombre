@@ -98,9 +98,9 @@ class Spectrum(object):
     def table(self):
         return Table(
             [
-                (spec.wavelength / 1e4) * u.micron,
-                spec.spec * cds.ppm,
-                spec.spec_err * cds.ppm,
+                (self.wavelength / 1e4) * u.micron,
+                self.spec * cds.ppm,
+                self.spec_err * cds.ppm,
             ],
             names=["wavelength", "spectrum", "spectrum_err"],
         )

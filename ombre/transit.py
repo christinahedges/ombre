@@ -61,7 +61,7 @@ def fit_transit(
             t0 = t0_val
         if fit_period:
             period = pm.Bound(
-                pm.Normal, lower=period_val - 0.01, upper=period_val + 0.01
+                pm.Normal, lower=period_val - 0.1, upper=period_val + 0.1
             )("period", mu=period_val, sigma=0.0001)
         else:
             period = period_val
@@ -95,7 +95,9 @@ def fit_transit(
 
         # Compute the model light curve using starry
         if len(x_suppl) > 0:
-            r_suppl = pm.Normal("r_suppl", mu=r_val, sigma=r_val * 0.3)
+            r_suppl = pm.Uniform(
+                "r_suppl", lower=r_val * 0.1, upper=r_val * 10, testval=r_val
+            )
 
             light_curves_suppl = xo.LimbDarkLightCurve(u_suppl).get_light_curve(
                 orbit=orbit, r=r_suppl, t=x_suppl, texp=exptime_suppl
