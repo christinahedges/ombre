@@ -863,7 +863,7 @@ class Observation(object):
     #    break
     #        self.model = simple_model(self)
 
-    def fit_transmission_spectrum(self, npoly=2, visits="all", joint_fit=False):
+    def fit_spectra(self, npoly=2, visits="all", joint_fit=False):
         if visits == "all":
             visits = np.unique([visit.visit_number for visit in self])
         if not hasattr(visits, "__iter__"):

@@ -2,6 +2,12 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from astropy.io import fits
+from astropy.table import Table
+from astropy.time import Time
+import astropy.units as u
+from astropy.units import cds
+
+cds.enable()
 
 
 class Spectra(object):
@@ -40,35 +46,70 @@ class Spectra(object):
             ax.legend()
             ax.set_title(f"{self.name}")
 
-    def write(self):
-        raise NotImplementedError
+    def to_hdu(self):
+        hdr = fits.Header()
+        hdr["ORIGIN"] = "ombre"
+        hdr["TARGET"] = f"{self.name}"
+        hdr["DATE"] = Time.now().isot.split("T")[0]
+        hdr["DEPTH"] = self.depth
+        hdr["AUTHOR"] = "Christina Hedges (christina.l.hedges@nasa.gov)"
+        hdr["VISITS"] = ", ".join(np.asarray(self.visits, str))
+
+        phdu = fits.PrimaryHDU(header=hdr)
+        hdulist = [phdu]
+
+        for spec in self:
+            visits = spec.visit
+            if not hasattr(visits, "__iter__"):
+                visits = [visits]
+
+            tab = Table(
+                [
+                    (spec.wavelength / 1e4) * u.micron,
+                    spec.spec * cds.ppm,
+                    spec.spec_err * cds.ppm,
+                ],
+                names=["wavelength", "spectrum", "spectrum_err"],
+            )
+
+            hdu = fits.table_to_hdu(tab)
+            hdr = hdu.header
+            hdr["Visit"] = ", ".join(np.asarray(visits, str))
+            hdr["Name"] = spec.name
+
+            if spec.meta is not None:
+                for key, item in meta.items():
+                    hdr[key] = item
+
+            hdulist.append(hdu)
+
+        return fits.HDUList(hdulist)
 
 
 class Spectrum(object):
     """Helper object to carry  spectra"""
 
-    def __init__(self, wavelength, spec, spec_err, visit, depth, name=None):
+    def __init__(self, wavelength, spec, spec_err, visit, depth, meta=None, name=None):
         self.wavelength = wavelength
         self.spec = spec
         self.spec_err = spec_err
         self.visit = visit
         self.name = name
+        self.depth = depth
+        self.meta = meta
 
     @property
     def table(self):
-        return [
-            pd.DataFrame(
-                np.vstack(
-                    [
-                        self.wavelength[idx],
-                        self.spec[idx],
-                        self.spec_err[idx],
-                    ]
-                ).T,
-                columns=["wavelength", "spec", "spec_err"],
-            )
-            for idx in range(self.nv)
-        ]
+        return pd.DataFrame(
+            np.vstack(
+                [
+                    self.wavelength,
+                    self.spec,
+                    self.spec_err,
+                ]
+            ).T,
+            columns=["wavelength", "spec", "spec_err"],
+        )
 
     def __repr__(self):
         return f"Spectrum [Visits {self.visit}]"

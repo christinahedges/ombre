@@ -1099,6 +1099,38 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2, visits="all"):
         visit.partial_model = m
         kdx += 1
 
+    if not hasattr(visits, "__iter__"):
+        visits = [visits]
+
+    keys = [
+        "TELESCOP",
+        "INSTRUME",
+        "TARGNAME",
+        "RA_TARG",
+        "DEC_TARG",
+        "PROPOSID",
+        "PR_INV_L",
+        "DATE-OBS",
+        "FILTER",
+    ]
+    meta = {
+        key: ", ".join(
+            list(
+                np.unique(
+                    np.hstack(
+                        [
+                            visit.hdrs[0][key]
+                            for visit in obs1
+                            if (visit.visit_number in visits)
+                            & (visit.direction == "forward")
+                        ]
+                    )
+                ).astype(str)
+            )
+        )
+        for key in keys
+    }
+
     return (
         Spectrum(
             waxis,
@@ -1107,6 +1139,7 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2, visits="all"):
             depth=obs.depth,
             name=obs.name,
             visit=visits,
+            meta=meta,
         ),
         Spectrum(
             waxis,
@@ -1115,6 +1148,7 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2, visits="all"):
             depth=obs.eclipse_depth,
             name=obs.name,
             visit=visits,
+            meta=meta,
         ),
     )
     #
