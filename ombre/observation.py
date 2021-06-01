@@ -1114,8 +1114,8 @@ class Observation(object):
         if output is None:
             output = f"{self.name}_output.p"
         pickle.dump(r, open(output, "wb"))
-        self.transmission_spec.hdulist.write(f"{self.name}_transmission.fits")
-        self.emission_spec.hdulist.write(f"{self.name}_emission.fits")
+        self.transmission_spec.hdulist.writeto(f"{self.name}_transmission.fits")
+        self.emission_spec.hdulist.writeto(f"{self.name}_emission.fits")
 
     def save(self, dir="results"):
         if not os.path.isdir("{}/{}".format(dir, self.name)):

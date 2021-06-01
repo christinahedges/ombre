@@ -1113,6 +1113,8 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2, visits="all"):
         "DATE-OBS",
         "FILTER",
     ]
+    direction = np.unique([visit.direction for visit in obs])[0]
+
     meta = {
         key: ", ".join(
             list(
@@ -1122,7 +1124,6 @@ def fit_transmission_spectrum(obs, wav_grid1, wav_grid2, npoly=2, visits="all"):
                             visit.hdrs[0][key]
                             for visit in obs
                             if (visit.visit_number in visits)
-                            & (visit.direction == "forward")
                         ]
                     )
                 ).astype(str)

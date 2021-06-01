@@ -54,7 +54,15 @@ class Spectra(object):
         hdr["TARGET"] = f"{self.name}"
         hdr["DATE"] = Time.now().isot.split("T")[0]
         hdr["AUTHOR"] = "Christina Hedges (christina.l.hedges@nasa.gov)"
-        hdr["VISITS"] = ", ".join(np.asarray(self.visits, str))
+        hdr["VISITS"] = ", ".join(
+            np.asarray(
+                [
+                    ", ".join(np.asarray(v, str)) if hasattr(v, "__iter__") else v
+                    for v in self.visits
+                ],
+                str,
+            )
+        )
 
         phdu = fits.PrimaryHDU(header=hdr)
         hdulist = [phdu]
