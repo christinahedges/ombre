@@ -1,0 +1,31 @@
+[tool.poetry]
+name = "ombre"
+version = "0.1.0"
+description = "Creates Transmission Spectra from HST WFC3 data"
+authors = ["Christina Hedges <christina.l.hedges@nasa.gov>"]
+license = "MIT"
+
+[tool.poetry.dependencies]
+python = "^3.8,<3.10"
+lightkurve = "^2.0.10"
+scipy = "^1.7.0"
+starry = "^1.1.2"
+exoplanet = "^0.5.1"
+pandas = "^1.2.5"
+
+[tool.poetry.dev-dependencies]
+mkdocs = "^1.2.1"
+mkdocs-material = "^7.1.9"
+mkdocstrings = "^0.15.2"
+pytkdocs = {version = "^0.11.1", extras = ["numpy-style"]}
+flake8 = "^3.9.2"
+black = "^21.6b0"
+pytest = "^6.2.4"
+ipython = "^7.25.0"
+jupyterlab = "^3.0.16"
+corner = "^2.2.1"
+line-profiler = "^3.3.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,28 @@
+site_name: ombre
+nav:
+    - Home: index.md
+    - observation: observation.md
+    - spec: spectra.md
+theme:
+  name: "material"
+  icon:
+    logo: material/box-shadow
+  palette:
+    scheme: default
+    primary: black
+    accent: deep orange
+
+repo_url: https://github.com/christinahedges/ombre
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          selection:
+            docstring_style: "numpy"
+          rendering:
+            show_source: false
+      custom_templates: templates
+      watch:
+        - src/ombre
