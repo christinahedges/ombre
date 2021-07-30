@@ -139,12 +139,10 @@ def fit_transit(
         )
 
         # Compute the model light curve using starry
-        light_curves = xo.LimbDarkLightCurve(u).get_light_curve(
+        transits = xo.LimbDarkLightCurve(u).get_light_curve(
             orbit=orbit, r=r, t=x, texp=exptime
         )
-        light_curve = pm.Deterministic(
-            "light_curve", (pm.math.sum(light_curves, axis=-1)) + 1
-        )
+        transit = pm.Deterministic("transit", (pm.math.sum(transits, axis=-1)))
 
         # Set up a Keplerian orbit for the planets
         eclipse_orbit = xo.orbits.KeplerianOrbit(
@@ -167,31 +165,41 @@ def fit_transit(
                 "r_suppl", lower=r_val * 0.1, upper=r_val * 10, testval=r_val
             )
 
-            light_curves_suppl = xo.LimbDarkLightCurve(u_suppl).get_light_curve(
+            eclipse_r_suppl = pm.Uniform(
+                "r_suppl", lower=0, upper=r_val * 2, testval=r_val * 0.1
+            )
+
+            transits_suppl = xo.LimbDarkLightCurve(u_suppl).get_light_curve(
                 orbit=orbit, r=r_suppl, t=x_suppl, texp=exptime_suppl
             )
-            light_curve_suppl = pm.Deterministic(
-                "light_curve_suppl", (pm.math.sum(light_curves_suppl, axis=-1)) + 1
+            transit_suppl = pm.Deterministic(
+                "transit_suppl", (pm.math.sum(transits_suppl, axis=-1))
+            )
+
+            eclipses_suppl = xo.LimbDarkLightCurve([0, 0]).get_light_curve(
+                orbit=eclipse_orbit, r=r_suppl, t=x_suppl, texp=exptime_suppl
+            )
+            eclipse_suppl = pm.Deterministic(
+                "transit_suppl", (pm.math.sum(eclipses_suppl, axis=-1))
             )
 
         sigma_w_inv = tt.dot(A.T, A / yerr[:, None] ** 2)
-        B = tt.dot(A.T, (y - ((light_curve + eclipse) * normalization)) / yerr ** 2)
+        B = tt.dot(A.T, (y - ((transit + eclipse) * normalization)) / yerr ** 2)
         w = tt.slinalg.solve(sigma_w_inv, B)
         noise_model = pm.Deterministic("noise_model", tt.dot(A, w))
 
-        no_limb = pm.Deterministic(
-            "no_limb",
+        no_limb_transit = pm.Deterministic(
+            "no_limb_transit",
             pm.math.sum(
                 xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(
                     orbit=orbit, r=r, t=x, texp=exptime
                 ),
                 axis=-1,
-            )
-            + 1,
+            ),
         )
         if subtime is not None:
-            light_curve_subtime = pm.Deterministic(
-                "light_curve_subtime",
+            transit_subtime = pm.Deterministic(
+                "transit_subtime",
                 pm.math.sum(
                     xo.LimbDarkLightCurve(u).get_light_curve(
                         orbit=orbit, r=r, t=subtime.ravel(), texp=exptime
@@ -199,8 +207,20 @@ def fit_transit(
                     axis=-1,
                 ),
             )
-            no_limb_subtime = pm.Deterministic(
-                "no_limb_subtime",
+            eclipse_subtime = pm.Deterministic(
+                "eclipse_subtime",
+                pm.math.sum(
+                    xo.LimbDarkLightCurve(u).get_light_curve(
+                        orbit=eclipse_orbit,
+                        r=eclipse_r,
+                        t=subtime.ravel(),
+                        texp=exptime,
+                    ),
+                    axis=-1,
+                ),
+            )
+            no_limb_transit_subtime = pm.Deterministic(
+                "no_limb_transit_subtime",
                 pm.math.sum(
                     xo.LimbDarkLightCurve(np.asarray([0, 0])).get_light_curve(
                         orbit=orbit, r=r, t=subtime.ravel(), texp=exptime
@@ -210,13 +230,13 @@ def fit_transit(
             )
 
         full_model = pm.Deterministic(
-            "full_model", ((light_curve + eclipse + noise_model) * normalization)
+            "full_model", ((transit + eclipse + noise_model) * normalization)
         )
 
         if len(x_suppl) == 0:
             pm.Normal("obs", mu=full_model, sigma=yerr, observed=y)
         else:
-            model_suppl = light_curve_suppl * norm_suppl
+            model_suppl = transit_suppl * norm_suppl
             pm.Normal(
                 "obs",
                 mu=tt.concatenate([model_suppl, full_model]),

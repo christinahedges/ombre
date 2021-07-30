@@ -143,11 +143,18 @@ class Visit(object):
                 for idx in range(self.nt)
             ]
         )
-        self._get_nexsci()
+
+    def __repr__(self):
+        return "{} Visit {}, Forward {} [Proposal ID: {}]".format(
+            self.name, self.visit_number, self.forward, self.propid
+        )
+
+    def calibrate(self):
+        if not hasattr(self, "st_teff"):
+            self._get_nexsci()
         self.wavelength, self.sensitivity, self.sensitivity_t = wavelength_calibrate(
             self, teff=self.st_teff
         )
-
         if self.filter == "G141":
             l = np.where(np.abs(np.gradient(self.sensitivity_t)) > 0.06)[0]
             lower, upper = (
@@ -174,11 +181,6 @@ class Visit(object):
         [setattr(self, attr, _auto_mask(getattr(self, attr), mask)) for attr in attrs]
         self.shape = self.data.shape
         self.nt, self.nsp, self.nwav = self.shape
-
-    def __repr__(self):
-        return "{} Visit {}, Forward {} [Proposal ID: {}]".format(
-            self.name, self.visit_number, self.forward, self.propid
-        )
 
     def _build_regressors(self):
         """Builds xshift, yshift, and bkg regressors"""
@@ -305,14 +307,15 @@ class Visit(object):
         else:
             mask = postarg2 <= 0
         return Visit(
-            sci=np.asarray(sci)[mask][s[mask]],
-            err=np.asarray(err)[mask][s[mask]],
-            dq=np.asarray(dq)[mask][s[mask]],
-            time=time[mask][s[mask]],
+            sci=np.asarray(sci)[s][mask],
+            err=np.asarray(err)[s][mask],
+            dq=np.asarray(dq)[s][mask],
+            time=time[s][mask],
             exptime=hdrs[0]["EXPTIME"],
             name=hdrs[0]["TARGNAME"],
+            forward=forward,
             propid=hdrs[0]["PROPOSID"],
-            filenames=filenames[mask][s[mask]],
+            filenames=filenames[s][mask],
             filter=hdrs[0]["FILTER"],
             visit_number=visit_number,
             ra=hdrs[0]["RA_TARG"],
@@ -464,18 +467,21 @@ class Visit(object):
             )
         self.radius *= u.earthRad.to(u.solRad)
 
-    def fit_transit(self):
+    def _prepare_design_matrix(self):
+        if not hasattr(self, "st_teff"):
+            self._get_nexsci()
+        grad = np.gradient(self.average_lc / self.average_lc.mean())[:8]
         hook_model = -np.exp(
             np.polyval(
                 np.polyfit(
-                    self.time[:8] - self.time[0],
-                    np.log(np.gradient(self.average_lc / self.average_lc.mean())[:8]),
+                    self.time[:8][grad > 0] - self.time[0],
+                    np.log(grad[grad > 0]),
                     1,
                 ),
                 self.time - self.time[0],
             )
         )
-        A = np.vstack(
+        return np.vstack(
             [
                 self.xshift,
                 self.yshift,
@@ -484,6 +490,9 @@ class Visit(object):
                 hook_model,
             ]
         ).T
+
+    def fit_transit(self):
+        A = self._prepare_design_matrix()
         self._pymc3_model, self.map_soln = fit_transit(
             x=self.time,
             y=self.average_lc / np.median(self.average_lc),
@@ -498,6 +507,18 @@ class Visit(object):
             A=A,
             subtime=self._subtime,
         )
+
+    @property
+    def no_limb_transit_subtime(self):
+        return self.map_soln["no_limb_transit_subtime"].reshape((self.nt, self.nsp))
+
+    @property
+    def transit_subtime(self):
+        return self.map_soln["transit_subtime"].reshape((self.nt, self.nsp))
+
+    @property
+    def eclipse_subtime(self):
+        return self.map_soln["eclipse_subtime"].reshape((self.nt, self.nsp))
 
     def diagnose(self, frame: int = 0) -> plt.figure:
         """Make a diagnostic plot for the visit
@@ -595,16 +616,24 @@ class Visit(object):
                 # )
                 ax.scatter(
                     self.time,
-                    self.map_soln["noise_model"] + 1,
+                    self.map_soln["noise_model"],
                     c="purple",
                     label="Noise Model",
                 )
-                ax.plot(
-                    self.time,
-                    self.map_soln["light_curve"],
-                    c="blue",
-                    label="Planet model",
-                )
+                if np.nansum(self.map_soln["transit"]) != 0:
+                    ax.plot(
+                        self.time,
+                        self.map_soln["transit"] + 1,
+                        c="blue",
+                        label="Transit model",
+                    )
+                if np.nansum(self.map_soln["eclipse"]) != 0:
+                    ax.plot(
+                        self.time,
+                        self.map_soln["eclipse"] + 1,
+                        c="red",
+                        label="Eclipse model",
+                    )
                 ax.legend()
             ax.set(
                 title="Average Light Curve",

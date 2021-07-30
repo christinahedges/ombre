@@ -95,7 +95,7 @@ class Spectrum(object):
         return len(self.spec)
 
     def __repr__(self):
-        return f"Spectrum [Visits {self.visit}]"
+        return f"Spectrum [Visit {self.visit}]"
 
     def plot(self, ax: Optional[plt.Axes] = None, **kwargs) -> plt.Axes:
         """Create a plot of the `Spectrum`.
@@ -116,15 +116,21 @@ class Spectrum(object):
         with plt.style.context("seaborn-white"):
             if ax is None:
                 _, ax = plt.subplots()
-            k = self.spec_err < 1e5
-            ax.errorbar(
-                self.wavelength,
-                self.spec,
-                self.spec_err,
-                **kwargs,
-            )
+            if np.nansum(self.spec_err) != 0:
+                ax.errorbar(
+                    self.wavelength,
+                    self.spec,
+                    self.spec_err,
+                    **kwargs,
+                )
+            else:
+                ax.plot(
+                    self.wavelength,
+                    self.spec,
+                    **kwargs,
+                )
             plt.title(f"{self.name}, Visit: {self.visit}")
-            plt.xlabel("Wavelength [A]")
+            plt.xlabel("Wavelength")
             plt.ylabel("$\delta$ Transit Depth [ppm]")
         return ax
 
@@ -192,13 +198,17 @@ class Spectra(object):
             return "Empty Spectra"
         return f"Spectra [Visits: {self.visits}]"
 
-    def plot(self, ax: Optional[plt.Axes] = None, **kwargs) -> plt.Axes:
+    def plot(
+        self, ax: Optional[plt.Axes] = None, legend: bool = False, **kwargs
+    ) -> plt.Axes:
         """Create a plot of the `Spectra`.
 
         Parameters
         ----------
         ax : matplotlib.pyplot.axes object, optional
             Optional axes object to plot into
+        legend: bool
+            If True, will add a legend to the plot
         kwargs : dict
             Optional dictionary of keyword arguments to pass to
             matplotlib.pyplot.plot
@@ -213,8 +223,10 @@ class Spectra(object):
                 _, ax = plt.subplots()
             for ts in self:
                 ts.plot(ax=ax, label=f"Visit {ts.visit}", **kwargs)
-            ax.legend()
+            if legend:
+                ax.legend()
             ax.set_title(f"{self.name}")
+        return ax
 
     @property
     def hdulist(self):

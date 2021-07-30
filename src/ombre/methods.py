@@ -26,7 +26,8 @@ from scipy.stats import pearsonr
 import exoplanet as xo
 import pymc3 as pm
 import theano.tensor as tt
-from numba import jit
+
+# from numba import jit
 
 from . import PACKAGEDIR
 from .spec import Spectra, Spectrum
