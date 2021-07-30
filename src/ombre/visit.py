@@ -16,6 +16,7 @@ from astropy.convolution import convolve, Box2DKernel
 from . import PACKAGEDIR
 from .modeling import fit_transit
 from .calibrate import wavelength_calibrate
+from .matrix import fit_model
 
 from urllib.request import URLError
 
@@ -324,11 +325,6 @@ class Visit(object):
             #            period=period,
         )
 
-    @staticmethod
-    def from_observation():
-        """Create a visit from multiple files"""
-        pass
-
     @property
     def average_vsr(self):
         return self._slanted_vsr
@@ -507,6 +503,9 @@ class Visit(object):
             A=A,
             subtime=self._subtime,
         )
+
+    def fit_model(self, spline=False, nknots=30, nsamps=40):
+        fit_model(self, spline=spline, nknots=nknots, nsamps=nsamps)
 
     @property
     def no_limb_transit_subtime(self):

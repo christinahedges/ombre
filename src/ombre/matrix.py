@@ -152,7 +152,7 @@ def build_transit_matrix(visit, spline=False, nknots=30):
     return Anames, As
 
 
-def fit_model(visit, rho=1000, sigma=1000, spline=False, nknots=30, nsamps=40):
+def fit_model(visit, spline=False, nknots=30, nsamps=40):
 
     if spline:
         spline1 = lk.designmatrix.create_sparse_spline_matrix(
@@ -274,9 +274,6 @@ def fit_model(visit, rho=1000, sigma=1000, spline=False, nknots=30, nsamps=40):
                     visit.wavelength.to(u.micron).value,
                     s1,
                     s1 * np.nan,
-                    depth=td,
-                    name=visit.name + " Transmission Spectrum",
-                    visit=visit.visit_number,
                 )
                 for s1 in samples.T
             ],

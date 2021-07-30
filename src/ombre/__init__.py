@@ -7,3 +7,4 @@ PACKAGEDIR = os.path.abspath(os.path.dirname(__file__))
 from .version import __version__
 from .spec import Spectra, Spectrum
 from .visit import Visit
+from .observation import Observation
