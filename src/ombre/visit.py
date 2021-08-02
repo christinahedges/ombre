@@ -20,6 +20,8 @@ from .matrix import fit_model
 
 from urllib.request import URLError
 
+from .query import get_nexsci
+
 CALIPATH = "{}{}".format(PACKAGEDIR, "/data/calibration/")
 
 
@@ -144,6 +146,7 @@ class Visit(object):
                 for idx in range(self.nt)
             ]
         )
+        self.A = self._prepare_design_matrix()
 
     def __repr__(self):
         return "{} Visit {}, Forward {} [Proposal ID: {}]".format(
@@ -152,7 +155,7 @@ class Visit(object):
 
     def calibrate(self):
         if not hasattr(self, "st_teff"):
-            self._get_nexsci()
+            get_nexsci(self)
         self.wavelength, self.sensitivity, self.sensitivity_t = wavelength_calibrate(
             self, teff=self.st_teff
         )
@@ -184,7 +187,7 @@ class Visit(object):
         self.nt, self.nsp, self.nwav = self.shape
 
     def _build_regressors(self):
-        """Builds xshift, yshift, and bkg regressors"""
+        """Builds xshift, yshift, and bkg regressors for fitting transit"""
         w = np.ones(self.sci.shape)
         w[self.err / self.sci > 0.1] = 1e10
 
@@ -429,43 +432,10 @@ class Visit(object):
         flat = np.atleast_3d(flat).transpose([2, 0, 1])
         return flat
 
-    def _get_nexsci(self):
-        # old API
-        # url = (
-        #     "https://exoplanetarchive.ipac.caltech.edu/cgi-bin/nstedAPI/nph-nstedAPI?"
-        #     "table=ps&"
-        #     "select=ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_orbincl,st_rad,st_mass&"
-        #     f"where=ra%3E{self.ra - 0.0083333}%20and%20ra%3C{self.ra + 0.0083333}%20and%20dec%3E{self.dec - 0.0083333}%20and%20dec%3C{self.dec + 0.0083333}"
-        # )
-        url = (
-            "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-            "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_orbincl,st_rad,st_mass,st_teff+from+pscomppars+where+"
-            f"ra+>+{self.ra - 0.0083333}+and+ra+<+{self.ra + 0.0083333}+and+dec+>{self.dec - 0.0083333}+and+dec+<{self.dec + 0.0083333}"
-        )
-        try:
-            (
-                ra,
-                dec,
-                self.period,
-                self.t0,
-                self.duration,
-                self.radius,
-                self.incl,
-                self.st_rad,
-                self.st_mass,
-                self.st_teff,
-            ) = (
-                votable.parse(url).get_first_table().to_table().to_pandas().iloc[0]
-            )
-        except URLError:
-            raise URLError(
-                "Can not access the internet to query NExSci for exoplanet parameters."
-            )
-        self.radius *= u.earthRad.to(u.solRad)
-
     def _prepare_design_matrix(self):
+        """Make a design matrix for transit fitting"""
         if not hasattr(self, "st_teff"):
-            self._get_nexsci()
+            get_nexsci(self)
         grad = np.gradient(self.average_lc / self.average_lc.mean())[:8]
         hook_model = -np.exp(
             np.polyval(
@@ -477,6 +447,11 @@ class Visit(object):
                 self.time - self.time[0],
             )
         )
+
+        poly = np.vstack(
+            [(self.time - self.time.mean()) ** idx for idx in np.arange(4)[::-1]]
+        )
+
         return np.vstack(
             [
                 self.xshift,
@@ -484,11 +459,11 @@ class Visit(object):
                 self.xshift * self.yshift,
                 self.bkg,
                 hook_model,
+                poly,
             ]
         ).T
 
     def fit_transit(self):
-        A = self._prepare_design_matrix()
         self._pymc3_model, self.map_soln = fit_transit(
             x=self.time,
             y=self.average_lc / np.median(self.average_lc),
@@ -500,7 +475,7 @@ class Visit(object):
             r_star=self.st_rad,
             m_star=self.st_mass,
             exptime=np.median(np.diff(self.time)),
-            A=A,
+            A=self.A,
             subtime=self._subtime,
         )
 
@@ -801,8 +776,10 @@ def simple_mask(
         data = sci / mask
         data[~np.isfinite(data)] = np.nan
 
-    spectral = np.nanmean(data, axis=(0, 1))
-    spatial = np.nanmean(data, axis=(0, 2))
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        spectral = np.nanmean(data, axis=(0, 1))
+        spatial = np.nanmean(data, axis=(0, 2))
 
     # These are hard coded to be generous.
     spatial_cut = 0.2

@@ -18,7 +18,7 @@ def fit_transit(
     r_star,
     m_star,
     exptime,
-    A=None,
+    A,
     subtime=None,
     fit_period=True,
     fit_inc=False,
@@ -39,29 +39,29 @@ def fit_transit(
         Flux array
     """
     breaks = np.where(np.diff(x) > 2)[0] + 1
-    if len(breaks) == 0:
-        breaks = np.atleast_1d(len(x))
-    poly = np.vstack(
-        [
-            (x * np.in1d(x, x1) - (x * np.in1d(x, x1)).mean())
-            / ((x * np.in1d(x, x1)).max() - (x * np.in1d(x, x1)).min())
-            for idx, x1 in enumerate(np.array_split(x, breaks))
-            if len(x1) != 0
-        ]
-    ).T
-
-    x_broken = np.vstack(
-        [
-            (x * np.in1d(x, x1) - x[np.in1d(x, x1)][0])
-            for idx, x1 in enumerate(np.array_split(x, breaks))
-            if len(x1) != 0
-        ]
-    ).T
-
-    if A is None:
-        A = np.hstack([poly ** idx for idx in np.arange(0, npoly + 1)])
-    else:
-        A = np.hstack([A, np.hstack([poly ** idx for idx in np.arange(0, npoly + 1)])])
+    # if len(breaks) == 0:
+    #     breaks = np.atleast_1d(len(x))
+    # poly = np.vstack(
+    #     [
+    #         (x * np.in1d(x, x1) - (x * np.in1d(x, x1)).mean())
+    #         / ((x * np.in1d(x, x1)).max() - (x * np.in1d(x, x1)).min())
+    #         for idx, x1 in enumerate(np.array_split(x, breaks))
+    #         if len(x1) != 0
+    #     ]
+    # ).T
+    #
+    # x_broken = np.vstack(
+    #     [
+    #         (x * np.in1d(x, x1) - x[np.in1d(x, x1)][0])
+    #         for idx, x1 in enumerate(np.array_split(x, breaks))
+    #         if len(x1) != 0
+    #     ]
+    # ).T
+    #
+    # if A is None:
+    #     A = np.hstack([poly ** idx for idx in np.arange(0, npoly + 1)])
+    # else:
+    #     A = np.hstack([A, np.hstack([poly ** idx for idx in np.arange(0, npoly + 1)])])
 
     with pm.Model() as model:
         # # The baseline flux

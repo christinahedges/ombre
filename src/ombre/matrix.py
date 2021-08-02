@@ -10,6 +10,24 @@ import lightkurve as lk
 from .spec import Spectrum, Spectra
 
 
+def vstack_list(dms):
+    npoints = np.sum([dm.shape[0] for dm in dms])
+    ncomps = np.sum([dm.shape[1] for dm in dms])
+    if sparse.issparse(dms[0]):
+        X = sparse.lil_matrix((npoints, ncomps))
+    else:
+        X = np.zeros((npoints, ncomps))
+    idx = 0
+    jdx = 0
+    for dm in dms:
+        X[idx : idx + dm.shape[0], jdx : jdx + dm.shape[1]] += dm
+        idx = idx + dm.shape[0]
+        jdx = jdx + dm.shape[1]
+    if sparse.issparse(dms[0]):
+        return X.tocsr()
+    return X
+
+
 def vstack(vecs, n, wavelength_dependence=None):
     mats = []
     for vec in vecs:
