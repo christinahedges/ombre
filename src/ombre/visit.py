@@ -157,17 +157,23 @@ class Visit(object):
         if not hasattr(self, "st_teff"):
             get_nexsci(self)
         self.wavelength, self.sensitivity, self.sensitivity_t = wavelength_calibrate(
-            self, teff=self.st_teff
+            self
         )
+
         if self.filter == "G141":
             l = np.where(np.abs(np.gradient(self.sensitivity_t)) > 0.06)[0]
             lower, upper = (
                 l[np.argmax(np.diff(l))] + 3,
                 l[np.argmax(np.diff(l)) + 1] - 5,
             )
+            if lower > 20:
+                lower = 0
+            if upper < (self.sensitivity_t.shape[0] - 20):
+                upper = self.sensitivity_t.shape[0]
         else:
-            raise ValueError("Need to find out how to parse G102")
-
+            lower = 0
+            upper = self.sensitivity_t.shape[0]
+        self.trace_wavelength = self.wavelength.copy()
         # Mask out edges of trace
         attrs = [
             "data",
@@ -179,8 +185,8 @@ class Visit(object):
             "Y",
             "wavelength",
             "sensitivity",
-            "sensitivity_t",
         ]
+
         mask = np.in1d(np.arange(self.nwav), np.arange(lower, upper))
         [setattr(self, attr, _auto_mask(getattr(self, attr), mask)) for attr in attrs]
         self.shape = self.data.shape
@@ -256,6 +262,8 @@ class Visit(object):
                     filenames[0]
                 )
             )
+        if len(filenames) <= 12:
+            raise ValueError("Not enough frames in visit.")
         hdrs = [fits.getheader(file) for idx, file in enumerate(filenames)]
         exptime = np.asarray([hdr["EXPTIME"] for hdr in hdrs])
         filenames = filenames[exptime == np.median(exptime)]
@@ -290,6 +298,14 @@ class Visit(object):
             ]
         )
         s = np.argsort(time)
+        postarg1 = np.asarray([hdr["POSTARG1"] for hdr in hdrs])
+        postarg2 = np.asarray([hdr["POSTARG2"] for hdr in hdrs])
+        if forward:
+            mask = postarg2 > 0
+        else:
+            mask = postarg2 <= 0
+        if not np.any(mask):
+            raise ValueError("No files exist with that direction")
 
         sci, err, dq = [], [], []
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
@@ -304,12 +320,26 @@ class Visit(object):
                     err[jdx] /= hdulist[1].header["SAMPTIME"]
                 err[jdx][(dq[jdx] & qmask) != 0] = 1e10
 
-        postarg1 = np.asarray([hdr["POSTARG1"] for hdr in hdrs])
-        postarg2 = np.asarray([hdr["POSTARG2"] for hdr in hdrs])
-        if forward:
-            mask = postarg2 > 0
-        else:
-            mask = postarg2 <= 0
+        for sci1 in sci:
+            if (sci1 > 100).sum() < 2000:
+                raise ValueError("Not enough flux on target")
+
+        X, Y = np.mgrid[: sci[0].shape[0], : sci[0].shape[1]]
+        xs, ys = np.asarray(
+            [
+                [np.average(X, weights=s * (s > 100)) for s in sci],
+                [np.average(Y, weights=s * (s > 100)) for s in sci],
+            ]
+        )
+        arclength = np.hypot(xs - xs.min(), ys - ys.min())
+        if (arclength > 5).any():
+            raise ValueError("Lost fine point")
+
+        if (
+            np.nanmean(sci, axis=(0, 2)) > np.nanmean(sci, axis=(0, 2)).max() * 0.9
+        ).sum() < 4:
+            raise ValueError("Stare mode")
+
         return Visit(
             sci=np.asarray(sci)[s][mask],
             err=np.asarray(err)[s][mask],
@@ -449,7 +479,7 @@ class Visit(object):
         )
 
         poly = np.vstack(
-            [(self.time - self.time.mean()) ** idx for idx in np.arange(4)[::-1]]
+            [(self.time - self.time.mean()) ** idx for idx in np.arange(3)[::-1]]
         )
 
         return np.vstack(
@@ -476,23 +506,40 @@ class Visit(object):
             m_star=self.st_mass,
             exptime=np.median(np.diff(self.time)),
             A=self.A,
+            offsets=self.A[:, -1][:, None],
             subtime=self._subtime,
         )
+        self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
+            (self.nt, self.nsp)
+        )
+        self.transit_subtime = self.map_soln["transit_subtime"].reshape(
+            (self.nt, self.nsp)
+        )
+        self.eclipse_subtime = self.map_soln["eclipse_subtime"].reshape(
+            (self.nt, self.nsp)
+        )
+
+    @property
+    def oot(self):
+        return (self.eclipse + self.transit) == 0
 
     def fit_model(self, spline=False, nknots=30, nsamps=40):
+        """
+        Fits the eclipse/transit models for a given visit.
+
+        Parameters
+        ----------
+
+        spline: bool
+            Whether to use a spline model for the transit depth
+            If True, will use splines. This will make the spectrum
+            "smooth"
+        nknots: int
+            Number of knots for the spline
+        nsamps: int
+            Number of samples to draw for each spectrum
+        """
         fit_model(self, spline=spline, nknots=nknots, nsamps=nsamps)
-
-    @property
-    def no_limb_transit_subtime(self):
-        return self.map_soln["no_limb_transit_subtime"].reshape((self.nt, self.nsp))
-
-    @property
-    def transit_subtime(self):
-        return self.map_soln["transit_subtime"].reshape((self.nt, self.nsp))
-
-    @property
-    def eclipse_subtime(self):
-        return self.map_soln["eclipse_subtime"].reshape((self.nt, self.nsp))
 
     def diagnose(self, frame: int = 0) -> plt.figure:
         """Make a diagnostic plot for the visit
@@ -575,14 +622,14 @@ class Visit(object):
                 marker=".",
                 ls="",
             )
-            if hasattr(self, "map_soln"):
-                ax.scatter(
-                    self.time,
-                    self.map_soln["full_model"],
-                    c="r",
-                    s=0.1,
-                    label="Data",
-                )
+            if hasattr(self, "transit"):
+                # ax.scatter(
+                #     self.time,
+                #     self.map_soln["full_model"],
+                #     c="r",
+                #     s=0.1,
+                #     label="Data",
+                # )
                 # ax.plot(
                 #     self.time,
                 #     self.map_soln["hook"] + 1,
@@ -590,21 +637,21 @@ class Visit(object):
                 # )
                 ax.scatter(
                     self.time,
-                    self.map_soln["noise_model"],
+                    self.noise_model,
                     c="purple",
                     label="Noise Model",
                 )
-                if np.nansum(self.map_soln["transit"]) != 0:
+                if np.nansum(self.transit) != 0:
                     ax.plot(
                         self.time,
-                        self.map_soln["transit"] + 1,
+                        self.transit + 1,
                         c="blue",
                         label="Transit model",
                     )
-                if np.nansum(self.map_soln["eclipse"]) != 0:
+                if np.nansum(self.eclipse) != 0:
                     ax.plot(
                         self.time,
-                        self.map_soln["eclipse"] + 1,
+                        self.eclipse + 1,
                         c="red",
                         label="Eclipse model",
                     )
@@ -664,19 +711,32 @@ class Visit(object):
                 )
             )
             ax = plt.subplot2grid((3, 4), (1, 0))
-            im = ax.imshow(
-                self.residuals[frame],
-                cmap="coolwarm",
-                vmin=-vlevel,
-                vmax=vlevel,
+            # im = ax.imshow(
+            #     self.residuals[frame],
+            #     cmap="coolwarm",
+            #     vmin=-vlevel,
+            #     vmax=vlevel,
+            # )
+            # plt.colorbar(im, ax=ax)
+            # ax.set(
+            #     title="Residuals",
+            #     xlabel="Spectral Pixel",
+            #     ylabel="Spatial Pixel",
+            #     #                aspect="auto",
+            # )
+
+            ax.plot(
+                self.trace_wavelength,
+                self.sensitivity_t / self.sensitivity_t.mean(),
+                label="Model",
             )
-            plt.colorbar(im, ax=ax)
-            ax.set(
-                title="Residuals",
-                xlabel="Spectral Pixel",
-                ylabel="Spatial Pixel",
-                #                aspect="auto",
+            ax.plot(
+                self.trace_wavelength,
+                self.trace[~self.trace_mask] / self.trace[~self.trace_mask].mean(),
+                label="Data",
             )
+            ax.set(xlabel="Wavelength [A]", ylabel="Flux")
+            ax.legend()
 
             ax = plt.subplot2grid((3, 4), (1, 2), colspan=2)
             im = ax.scatter(self.time, self.xshift, label="xshift", s=1)
@@ -782,9 +842,9 @@ def simple_mask(
         spatial = np.nanmean(data, axis=(0, 2))
 
     # These are hard coded to be generous.
-    spatial_cut = 0.2
+    spatial_cut = 0.4
     if filter == "G102":
-        spectral_cut = 0.1
+        spectral_cut = 0.4
     if filter == "G141":
         spectral_cut = 0.3
 

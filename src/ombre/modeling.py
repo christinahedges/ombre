@@ -19,6 +19,7 @@ def fit_transit(
     m_star,
     exptime,
     A,
+    offsets,
     subtime=None,
     fit_period=True,
     fit_inc=False,
@@ -38,7 +39,7 @@ def fit_transit(
     y : np.ndarray
         Flux array
     """
-    breaks = np.where(np.diff(x) > 2)[0] + 1
+    # breaks = np.where(np.diff(x) > 2)[0] + 1
     # if len(breaks) == 0:
     #     breaks = np.atleast_1d(len(x))
     # poly = np.vstack(
@@ -65,16 +66,13 @@ def fit_transit(
 
     with pm.Model() as model:
         # # The baseline flux
-        norm = pm.Normal("norm", mu=y.mean(), sigma=y.std(), shape=len(breaks) + 1)
-        normalization = pm.Deterministic(
-            "normalization",
-            tt.concatenate(
-                [
-                    norm[idx] + np.zeros_like(x)
-                    for idx, x in enumerate(np.array_split(x, breaks))
-                ]
-            ),
-        )
+        # norm = pm.Normal(
+        #     "norm",
+        #     mu=np.asarray([np.average(y, weights=o) for o in offsets.T]),
+        #     sigma=np.asarray([y.std() for o in offsets.T]),
+        #     shape=offsets.shape[1],
+        # )
+        # normalization = pm.Deterministic("normalization", tt.dot(offsets, norm))
 
         # hook_coeffs = pm.Uniform(
         #     "hook_coeffs",
@@ -105,8 +103,8 @@ def fit_transit(
         if fit_t0:
             t0 = pm.Uniform(
                 "t0",
-                lower=t0_val - period_val / 2,
-                upper=t0_val + period_val / 2,
+                lower=t0_val - period_val / 20,
+                upper=t0_val + period_val / 20,
                 testval=t0_val,
             )
         else:
@@ -166,7 +164,7 @@ def fit_transit(
             )
 
             eclipse_r_suppl = pm.Uniform(
-                "r_suppl", lower=0, upper=r_val * 2, testval=r_val * 0.1
+                "eclipse_r_suppl", lower=0, upper=r_val * 2, testval=r_val * 0.1
             )
 
             transits_suppl = xo.LimbDarkLightCurve(u_suppl).get_light_curve(
@@ -177,14 +175,14 @@ def fit_transit(
             )
 
             eclipses_suppl = xo.LimbDarkLightCurve([0, 0]).get_light_curve(
-                orbit=eclipse_orbit, r=r_suppl, t=x_suppl, texp=exptime_suppl
+                orbit=eclipse_orbit, r=eclipse_r_suppl, t=x_suppl, texp=exptime_suppl
             )
             eclipse_suppl = pm.Deterministic(
-                "transit_suppl", (pm.math.sum(eclipses_suppl, axis=-1))
+                "eclipse_suppl", (pm.math.sum(eclipses_suppl, axis=-1))
             )
 
         sigma_w_inv = tt.dot(A.T, A / yerr[:, None] ** 2)
-        B = tt.dot(A.T, (y - ((transit + eclipse) * normalization)) / yerr ** 2)
+        B = tt.dot(A.T, (y / (transit + eclipse + 1)) / yerr ** 2)
         w = tt.slinalg.solve(sigma_w_inv, B)
         noise_model = pm.Deterministic("noise_model", tt.dot(A, w))
 
@@ -230,13 +228,13 @@ def fit_transit(
             )
 
         full_model = pm.Deterministic(
-            "full_model", ((transit + eclipse + noise_model) * normalization)
+            "full_model", (((transit + eclipse + 1) * noise_model))
         )
 
         if len(x_suppl) == 0:
             pm.Normal("obs", mu=full_model, sigma=yerr, observed=y)
         else:
-            model_suppl = transit_suppl * norm_suppl
+            model_suppl = (transit_suppl + eclipse_suppl + 1) * norm_suppl
             pm.Normal(
                 "obs",
                 mu=tt.concatenate([model_suppl, full_model]),
@@ -244,7 +242,10 @@ def fit_transit(
                 observed=(tt.concatenate([y_suppl, y])),
             )
 
-        map_soln = pmx.optimize(start=model.test_point, verbose=True, vars=[norm])
+        if fit_t0:
+            map_soln = pmx.optimize(start=model.test_point, verbose=True, vars=[t0])
+        else:
+            map_soln = pmx.optimize(start=model.test_point, verbose=True, vars=[norm])
         #        map_soln = pmx.optimize(start=map_soln, verbose=True, vars=[hook])
         map_soln = pmx.optimize(start=map_soln, verbose=True)
         return model, map_soln

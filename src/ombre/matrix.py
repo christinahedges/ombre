@@ -170,7 +170,22 @@ def build_transit_matrix(visit, spline=False, nknots=30):
     return Anames, As
 
 
-def fit_model(visit, spline=False, nknots=30, nsamps=40):
+def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
+    """
+    Fits the eclipse/transit models for a given visit.
+
+    Parameters
+    ----------
+
+    spline: bool
+        Whether to use a spline model for the transit depth
+        If True, will use splines. This will make the spectrum
+        "smooth"
+    nknots: int
+        Number of knots for the spline
+    nsamps: int
+        Number of samples to draw for each spectrum
+    """
 
     if spline:
         spline1 = lk.designmatrix.create_sparse_spline_matrix(
