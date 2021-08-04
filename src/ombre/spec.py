@@ -79,6 +79,27 @@ class Spectrum(object):
             name=self.name,
         )
 
+    def bin(self, bins: Optional[npt.NDArray] = None):
+        if bins is None:
+            bins = np.linspace(0.8, 1.7, 100)
+        y, ye = np.zeros(len(bins) - 1) * np.nan, np.zeros(len(bins) - 1) * np.nan
+        for idx in range(len(bins) - 1):
+            k = (self.wavelength > bins[idx]) & (self.wavelength <= bins[idx + 1])
+            if k.sum() == 0:
+                continue
+            y[idx] = np.median(self.spec[k])
+            ye[idx] = np.sum(self.spec_err[k] ** 2) ** 0.5 / k.sum()
+        bins = bins[:-1] + np.median(np.diff(bins)) / 2
+        return Spectrum(
+            bins,
+            y,
+            ye,
+            visit=self.visit,
+            depth=self.depth,
+            meta=self.meta,
+            name=self.name,
+        )
+
     @property
     def table(self) -> Table:
         """Spectrum as an astropy.table.Table object"""
@@ -227,6 +248,16 @@ class Spectra(object):
                 ax.legend()
             ax.set_title(f"{self.name}")
         return ax
+
+    def flatten(self):
+        return Spectrum(
+            np.hstack([spec.wavelength for spec in self]),
+            np.hstack([spec.spec for spec in self]),
+            np.hstack([spec.spec_err for spec in self]),
+            name=self[0].name,
+            meta=self[0].meta,
+            visit=self[0].visit,
+        )
 
     @property
     def hdulist(self):

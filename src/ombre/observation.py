@@ -7,6 +7,7 @@ from .visit import Visit
 from .query import get_nexsci, download_target
 from .matrix import vstack_list
 from .modeling import fit_transit
+from astropy.io import fits
 
 from tqdm import tqdm
 
@@ -87,10 +88,25 @@ class Observation(
     @staticmethod
     def from_files(fnames: List[str], **kwargs):
         """Make an Observation from files"""
-        unique = np.unique([fname.split("/")[-1][:6] for fname in fnames])
-        masks = np.asarray(
-            [fname.split("/")[-1][:6] == unq for unq in unique for fname in fnames]
-        ).reshape((len(unique), len(fnames)))
+        fnames = np.sort(fnames)
+        times = []
+        for f in fnames:
+            with fits.open(f, lazy_load_hdus=True) as hdu:
+                times.append(hdu[0].header["expstart"])
+        times = np.asarray(times)
+        s = np.argsort(times)
+        times, fnames = times[s], fnames[s]
+        breaks = np.hstack(
+            [0, np.where(np.diff(times) > (180 / (60 * 24)))[0] + 1, len(fnames)]
+        )
+        masks = [
+            np.in1d(np.arange(len(fnames)), np.arange(b1, b2))
+            for b1, b2 in zip(breaks[:-1], breaks[1:])
+        ]
+        # unique = np.unique([fname.split("/")[-1][:5] for fname in fnames])
+        # masks = np.asarray(
+        #     [fname.split("/")[-1][:5] == unq for unq in unique for fname in fnames]
+        # ).reshape((len(unique), len(fnames)))
 
         visits = []
         for direction in [True, False]:
@@ -212,7 +228,6 @@ class Observation(
                         self.phase, self.map_soln["eclipse"] + 1, s=2, label="Eclipse"
                     )
             ax.legend()
-
         return ax
 
     @property
@@ -262,9 +277,12 @@ class Observation(
 
     @property
     def oot(self):
-        return np.hstack(
-            [(visit.transit == 0) & (visit.eclipse == 0) for visit in self]
-        )
+        if hasattr(self, "map_soln"):
+            return np.hstack(
+                [(visit.transit == 0) & (visit.eclipse == 0) for visit in self]
+            )
+        else:
+            return np.hstack([np.ones(visit.nt, bool) for visit in self])
 
     def fit_model(self, spline=False, nknots=30, nsamps=40):
         """

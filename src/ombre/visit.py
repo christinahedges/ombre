@@ -173,6 +173,8 @@ class Visit(object):
         else:
             lower = 0
             upper = self.sensitivity_t.shape[0]
+        if (upper - lower) <= 5:
+            raise ValueError(f"Can not find trace: {lower} {upper}")
         self.trace_wavelength = self.wavelength.copy()
         # Mask out edges of trace
         attrs = [
@@ -188,7 +190,10 @@ class Visit(object):
         ]
 
         mask = np.in1d(np.arange(self.nwav), np.arange(lower, upper))
-        [setattr(self, attr, _auto_mask(getattr(self, attr), mask)) for attr in attrs]
+        [
+            setattr(self, attr, _auto_mask(getattr(self, attr), mask, dim=-1))
+            for attr in attrs
+        ]
         self.shape = self.data.shape
         self.nt, self.nsp, self.nwav = self.shape
 
@@ -297,7 +302,7 @@ class Visit(object):
                 for hdr in hdrs
             ]
         )
-        s = np.argsort(time)
+
         postarg1 = np.asarray([hdr["POSTARG1"] for hdr in hdrs])
         postarg2 = np.asarray([hdr["POSTARG2"] for hdr in hdrs])
         if forward:
@@ -310,7 +315,7 @@ class Visit(object):
         sci, err, dq = [], [], []
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
 
-        for jdx, file in enumerate(filenames):
+        for jdx, file in enumerate(filenames[mask]):
             with fits.open(file, cache=False, memmap=False) as hdulist:
                 sci.append(hdulist[1].data)
                 err.append(hdulist[2].data)
@@ -339,17 +344,17 @@ class Visit(object):
             np.nanmean(sci, axis=(0, 2)) > np.nanmean(sci, axis=(0, 2)).max() * 0.9
         ).sum() < 4:
             raise ValueError("Stare mode")
-
+        s = np.argsort(time[mask])
         return Visit(
-            sci=np.asarray(sci)[s][mask],
-            err=np.asarray(err)[s][mask],
-            dq=np.asarray(dq)[s][mask],
-            time=time[s][mask],
+            sci=np.asarray(sci)[s],
+            err=np.asarray(err)[s],
+            dq=np.asarray(dq)[s],
+            time=time[mask][s],
             exptime=hdrs[0]["EXPTIME"],
             name=hdrs[0]["TARGNAME"],
             forward=forward,
             propid=hdrs[0]["PROPOSID"],
-            filenames=filenames[s][mask],
+            filenames=filenames[mask][s],
             filter=hdrs[0]["FILTER"],
             visit_number=visit_number,
             ra=hdrs[0]["RA_TARG"],
@@ -519,8 +524,54 @@ class Visit(object):
             (self.nt, self.nsp)
         )
 
+    def plot(self, ax: Optional[plt.Axes] = None, **kwargs) -> plt.Axes:
+        """Create a plot of the `Observation`.
+
+        Parameters
+        ----------
+        ax : matplotlib.pyplot.axes object, optional
+            Optional axes object to plot into
+        kwargs : dict
+            Optional dictionary of keyword arguments to pass to
+            matplotlib.pyplot.plot
+
+        Returns
+        -------
+        ax :  matplotlib.pyplot.axes object, optional
+             Plot of the `Spectrum`.
+        """
+        with plt.style.context("seaborn-white"):
+            if ax is None:
+                _, ax = plt.subplots()
+            norm = np.median(self.average_lc[self.oot]) * np.ones(self.nt)
+            ax.scatter(
+                self.time,
+                self.average_lc / norm,
+                s=1,
+                c="r",
+                label="Raw",
+            )
+            ax.set(xlabel="Time [JD]", ylabel="$e^-s^{-1}$")
+            if hasattr(self, "transit"):
+                y = self.average_lc / self.noise_model
+                plt.scatter(
+                    self.time,
+                    y / np.median(y[self.oot]),
+                    c="k",
+                    s=1,
+                    label="Corrected",
+                )
+                if self.transit.sum() != 0:
+                    plt.scatter(self.time, self.transit + 1, s=2, label="Transit")
+                if self.eclipse.sum() != 0:
+                    plt.scatter(self.time, self.eclipse + 1, s=2, label="Eclipse")
+            ax.legend()
+        return ax
+
     @property
     def oot(self):
+        if not hasattr(self, "transit"):
+            return np.ones(self.nt, bool)
         return (self.eclipse + self.transit) == 0
 
     def fit_model(self, spline=False, nknots=30, nsamps=40):
@@ -850,13 +901,13 @@ def simple_mask(
 
     spectral = spectral > np.nanmax(spectral) * spectral_cut
     # G102 edge is hard to find.
-    if filter == "G102":
-        edge = (
-            np.where((np.gradient(spectral / np.nanmax(spectral)) < -0.07))[0][0] - 10
-        )
-        m = np.ones(len(spectral), bool)
-        m[edge:] = False
-        spectral &= m
+    # if filter == "G102":
+    #     edge = (
+    #         np.where((np.gradient(spectral / np.nanmax(spectral)) < -0.07))[0][0] - 10
+    #     )
+    #     m = np.ones(len(spectral), bool)
+    #     m[edge:] = False
+    #     spectral &= m
 
     spatial = spatial > np.nanmax(spatial) * spatial_cut
 
