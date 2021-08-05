@@ -73,6 +73,7 @@ class Visit(object):
     filenames: Optional[List[str]] = None
     ra: Optional[float] = None
     dec: Optional[float] = None
+    planet_letter: str = "b"
     #    t0: Optional[float] = None
     #    period: Optional[float] = None
 
@@ -155,10 +156,14 @@ class Visit(object):
 
     def calibrate(self):
         if not hasattr(self, "st_teff"):
-            get_nexsci(self)
-        self.wavelength, self.sensitivity, self.sensitivity_t = wavelength_calibrate(
-            self
-        )
+            get_nexsci(self, letter=self.planet_letter)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            (
+                self.wavelength,
+                self.sensitivity,
+                self.sensitivity_t,
+            ) = wavelength_calibrate(self)
 
         if self.filter == "G141":
             l = np.where(np.abs(np.gradient(self.sensitivity_t)) > 0.06)[0]
@@ -240,6 +245,7 @@ class Visit(object):
         forward: bool = True,
         t0: Optional[float] = None,
         period: Optional[float] = None,
+        planet_letter: str = "b",
     ):
         """Create a visit from multiple files
 
@@ -359,6 +365,7 @@ class Visit(object):
             visit_number=visit_number,
             ra=hdrs[0]["RA_TARG"],
             dec=hdrs[0]["DEC_TARG"],
+            planet_letter=planet_letter,
             #            t0=t0,
             #            period=period,
         )
@@ -499,21 +506,23 @@ class Visit(object):
         ).T
 
     def fit_transit(self):
-        self._pymc3_model, self.map_soln = fit_transit(
-            x=self.time,
-            y=self.average_lc / np.median(self.average_lc),
-            yerr=self.average_lc_err / np.median(self.average_lc),
-            r_val=self.radius,
-            t0_val=self.t0,
-            period_val=self.period,
-            inc_val=np.deg2rad(self.incl),
-            r_star=self.st_rad,
-            m_star=self.st_mass,
-            exptime=np.median(np.diff(self.time)),
-            A=self.A,
-            offsets=self.A[:, -1][:, None],
-            subtime=self._subtime,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._pymc3_model, self.map_soln = fit_transit(
+                x=self.time,
+                y=self.average_lc / np.median(self.average_lc),
+                yerr=self.average_lc_err / np.median(self.average_lc),
+                r_val=self.radius,
+                t0_val=self.t0,
+                period_val=self.period,
+                inc_val=np.deg2rad(self.incl),
+                r_star=self.st_rad,
+                m_star=self.st_mass,
+                exptime=np.median(np.diff(self.time)),
+                A=self.A,
+                offsets=self.A[:, -1][:, None],
+                subtime=self._subtime,
+            )
         self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
             (self.nt, self.nsp)
         )
@@ -886,9 +895,6 @@ def simple_mask(
         warnings.simplefilter("ignore")
         data = sci / mask
         data[~np.isfinite(data)] = np.nan
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
         spectral = np.nanmean(data, axis=(0, 1))
         spatial = np.nanmean(data, axis=(0, 2))
 

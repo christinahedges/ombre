@@ -8,9 +8,7 @@ from astropy.io import fits
 from astropy.table import Table
 from astropy.time import Time
 import astropy.units as u
-from astropy.units import cds
-
-cds.enable()
+from lightkurve.units import ppm
 
 Shape = TypeVar("Shape")
 DType = TypeVar("DType")
@@ -106,8 +104,8 @@ class Spectrum(object):
         return Table(
             [
                 (self.wavelength / 1e4) * u.micron,
-                self.spec * cds.ppm,
-                self.spec_err * cds.ppm,
+                self.spec * ppm,
+                self.spec_err * ppm,
             ],
             names=["wavelength", "spectrum", "spectrum_err"],
         )
@@ -158,15 +156,10 @@ class Spectrum(object):
     @property
     def hdu(self):
         """Spectrum as an astropy.io.fits.HDU object. Use this to write a fits file."""
-        visits = self.visit
-        if not hasattr(visits, "__iter__"):
-            visits = [visits]
 
-        tab = self.table
-
-        hdu = fits.table_to_hdu(tab)
+        hdu = fits.table_to_hdu(self.table)
         hdr = hdu.header
-        hdr["Visit"] = ", ".join(np.asarray(visits, str))
+        hdr["Visit"] = self.visit
         hdr["Name"] = self.name
         hdr["DEPTH"] = self.depth
 
@@ -174,6 +167,20 @@ class Spectrum(object):
             for key, item in self.meta.items():
                 hdr[key] = item
         return hdu
+
+    @property
+    def hdulist(self):
+        """Spectrum as an astropy.io.fits.HDU object. Use this to write a fits file."""
+
+        hdr = fits.Header()
+        hdr["ORIGIN"] = "ombre"
+        hdr["TARGET"] = f"{self.name}"
+        hdr["DATE"] = Time.now().isot.split("T")[0]
+        hdr["AUTHOR"] = "Christina Hedges (christina.l.hedges@nasa.gov)"
+        phdu = fits.PrimaryHDU(header=hdr)
+        hdulist = [phdu]
+        hdulist.append(self.hdu)
+        return fits.HDUList(hdulist)
 
 
 class Spectra(object):
@@ -269,15 +276,18 @@ class Spectra(object):
         hdr["TARGET"] = f"{self.name}"
         hdr["DATE"] = Time.now().isot.split("T")[0]
         hdr["AUTHOR"] = "Christina Hedges (christina.l.hedges@nasa.gov)"
-        hdr["VISITS"] = ", ".join(
-            np.asarray(
-                [
-                    ", ".join(np.asarray(v, str)) if hasattr(v, "__iter__") else v
-                    for v in self.visits
-                ],
-                str,
+        try:
+            hdr["VISITS"] = ", ".join(
+                np.asarray(
+                    [
+                        ", ".join(np.asarray(v, str)) if hasattr(v, "__iter__") else v
+                        for v in self.visits
+                    ],
+                    str,
+                )
             )
-        )
+        except:
+            pass
         phdu = fits.PrimaryHDU(header=hdr)
         hdulist = [phdu]
         for spec in self:

@@ -4,22 +4,39 @@ from astroquery.mast import Observations as astropyObs
 from urllib.request import URLError
 from tqdm import tqdm
 import os
+import numpy as np
 import logging
 
 
 log = logging.getLogger("ombre")
 
 
-def get_nexsci(input, **kwargs):
+def get_nexsci(input, letter="b", **kwargs):
+    if isinstance(input, (tuple, list, np.ndarray)):
+        ra, dec = np.copy(input)
+    else:
+        ra, dec = np.copy(input.ra), np.copy(input.dec)
     url = (
         "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-        "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_orbincl,st_rad,st_mass,st_teff+from+pscomppars+where+"
-        f"ra+>+{input.ra - 0.0083333}+and+ra+<+{input.ra + 0.0083333}+and+dec+>{input.dec - 0.0083333}+and+dec+<{input.dec + 0.0083333}"
+        "select+ra,dec,pl_letter,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_orbincl,st_rad,st_mass,st_teff+from+pscomppars+where+"
+        f"ra+>+{ra - 0.0083333}+and+ra+<+{ra + 0.0083333}+and+dec+>{dec - 0.0083333}+and+dec+<{dec + 0.0083333}"
     )
     try:
-        (ra, dec, period, t0, duration, radius, incl, st_rad, st_mass, st_teff,) = (
-            votable.parse(url).get_first_table().to_table().to_pandas().iloc[0]
-        )
+        df = votable.parse(url).get_first_table().to_table().to_pandas()
+        df = df[df.pl_letter == letter].reset_index(drop=True)
+        (
+            ra,
+            dec,
+            pl_letter,
+            period,
+            t0,
+            duration,
+            radius,
+            incl,
+            st_rad,
+            st_mass,
+            st_teff,
+        ) = df.iloc[0]
     except URLError:
         raise URLError(
             "Can not access the internet to query NExSci for exoplanet parameters."

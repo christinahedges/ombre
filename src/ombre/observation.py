@@ -7,7 +7,9 @@ from .visit import Visit
 from .query import get_nexsci, download_target
 from .matrix import vstack_list
 from .modeling import fit_transit
+from .spec import Spectrum, Spectra
 from astropy.io import fits
+import warnings
 
 from tqdm import tqdm
 
@@ -20,6 +22,7 @@ class Observation(
 
     visits: List[Visit]
     name: str
+    planet_letter: str = "b"
     period: [Optional] = None
     t0: [Optional] = None
     duration: [Optional] = None
@@ -30,7 +33,9 @@ class Observation(
     st_teff: [Optional] = None
 
     def __post_init__(self):
-        period, t0, duration, radius, incl, st_rad, st_mass, st_teff = get_nexsci(self)
+        period, t0, duration, radius, incl, st_rad, st_mass, st_teff = get_nexsci(
+            self, letter=self.planet_letter
+        )
         (
             self.period,
             self.t0,
@@ -86,7 +91,7 @@ class Observation(
         return self.visits[s]
 
     @staticmethod
-    def from_files(fnames: List[str], **kwargs):
+    def from_files(fnames: List[str], planet_letter="b", **kwargs):
         """Make an Observation from files"""
         fnames = np.sort(fnames)
         times = []
@@ -119,7 +124,9 @@ class Observation(
                     )
                 except ValueError:
                     continue
-        return Observation(visits, name=visits[0].name, **kwargs)
+        return Observation(
+            visits, name=visits[0].name, planet_letter=planet_letter, **kwargs
+        )
 
     @staticmethod
     def from_MAST(targetname, **kwargs):
@@ -241,22 +248,24 @@ class Observation(
         return np.hstack([visit._subtime.ravel() for visit in self])
 
     def fit_transit(self, **kwargs):
-        self._pymc3_model, self.map_soln = fit_transit(
-            x=self.time,
-            y=self.average_lc / np.median(self.average_lc),
-            yerr=self.average_lc_err / np.median(self.average_lc),
-            r_val=self.radius,
-            t0_val=self.t0,
-            period_val=self.period,
-            inc_val=np.deg2rad(self.incl),
-            r_star=self.st_rad,
-            m_star=self.st_mass,
-            exptime=np.median(np.diff(self.time)),
-            A=self.A,
-            offsets=self.offsets,
-            subtime=self._subtime,
-            **kwargs,
-        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._pymc3_model, self.map_soln = fit_transit(
+                x=self.time,
+                y=self.average_lc / np.median(self.average_lc),
+                yerr=self.average_lc_err / np.median(self.average_lc),
+                r_val=self.radius,
+                t0_val=self.t0,
+                period_val=self.period,
+                inc_val=np.deg2rad(self.incl),
+                r_star=self.st_rad,
+                m_star=self.st_mass,
+                exptime=np.median(np.diff(self.time)),
+                A=self.A,
+                offsets=self.offsets,
+                subtime=self._subtime,
+                **kwargs,
+            )
         self.period = self.map_soln["period"]
         self.t0 = self.map_soln["t0"]
         for idx in range(len(self)):
@@ -306,6 +315,33 @@ class Observation(
                 self, desc="Fitting Transit/Eclipse Model", total=len(self)
             )
         ]
+
+    @property
+    def stellar_spectra(self):
+        spectra = []
+        for filter in ["G141", "G102"]:
+            w, y, ye = [], [], []
+            for visit in self:
+                if visit.filter != filter:
+                    continue
+                spec = visit.average_spectrum[0, 0, :] / visit.sensitivity
+                c = np.mean(spec)
+                w.append(visit.wavelength)
+                y.append(spec / c)
+                ye.append(np.zeros(visit.nwav))
+            if len(w) > 0:
+                w, y, ye = np.hstack(w), np.hstack(y), np.hstack(ye)
+                s = np.argsort(w)
+                spectra.append(
+                    Spectrum(
+                        w[s],
+                        y[s],
+                        ye[s],
+                        name=f"{self.name} Normalized Stellar Spectrum",
+                        visit=filter,
+                    )
+                )
+        return Spectra(spectra, name=f"{self.name} Stellar Spectrum")
 
     def plot_spectra(self):
         fig = plt.figure(figsize=(14, 5))

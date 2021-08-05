@@ -12,6 +12,8 @@ scipy = "^1.7.0"
 starry = "^1.1.2"
 exoplanet = "^0.5.1"
 pandas = "^1.2.5"
+aesara-theano-fallback = "^0.0.4"
+nbclient = "^0.5.3"
 
 [tool.poetry.dev-dependencies]
 mkdocs = "^1.2.1"
@@ -25,6 +27,9 @@ ipython = "^7.25.0"
 jupyterlab = "^3.0.16"
 corner = "^2.2.1"
 line-profiler = "^3.3.0"
+mkdocs-jupyter = "^0.17.3"
+nbterm = "^0.0.11"
+nbclient = "^0.5.3"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

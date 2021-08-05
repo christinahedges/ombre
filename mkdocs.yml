@@ -1,8 +1,26 @@
 site_name: ombre
 nav:
     - Home: index.md
-    - observation: observation.md
-    - spec: spectra.md
+    - 'API Documentation':
+      - observation: observation.md
+      - spec: spectra.md
+    - 'Catalog':
+      - XO-1: notebooks/XO-1.ipynb
+      - HD209458: notebooks/HD209458.ipynb
+      - GJ436 : notebooks/GJ436.ipynb
+      - GJ3470 : notebooks/GJ3470.ipynb
+      - GJ1214: notebooks/GJ1214.ipynb
+      - GJ9827-b: notebooks/GJ9827-b.ipynb
+      - HAT-P-11: notebooks/HAT-P-11.ipynb
+      - HAT-P-12: notebooks/HAT-P-12.ipynb
+      - HAT-P-17: notebooks/HAT-P-17.ipynb
+      - HAT-P-18: notebooks/HAT-P-18.ipynb
+      - K2-18: notebooks/K2-18-b.ipynb
+      - WASP-12: notebooks/WASP-12.ipynb
+      - WASP-107: notebooks/WASP-107.ipynb
+      - GJ1132: notebooks/GJ1132.ipynb
+    - To Do: todo.md
+
 theme:
   name: "material"
   icon:
@@ -11,10 +29,14 @@ theme:
     scheme: default
     primary: black
     accent: deep orange
-
+  features:
+      - navigation.tabs
+      - navigation.tabs.sticky
 repo_url: https://github.com/christinahedges/ombre
 plugins:
   - search
+  - mkdocs-jupyter:
+      execute: False
   - mkdocstrings:
       default_handler: python
       handlers:
