@@ -46,9 +46,10 @@ def get_nexsci(input, letter="b", **kwargs):
     return period, t0, duration, radius, incl, st_rad, st_mass, st_teff
 
 
-def download_target(targetname, radius="10 arcsec"):
+def download_target(targetname, radius="10 arcsec", download_dir=None):
     """Downloads the WFC3 observations for a target"""
-    download_dir = os.path.join(os.path.expanduser("~"), ".ombre-cache")
+    if download_dir is None:
+        download_dir = os.path.join(os.path.expanduser("~"), ".ombre-cache")
     if not os.path.isdir(download_dir):
         try:
             os.mkdir(download_dir)

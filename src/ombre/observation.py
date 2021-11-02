@@ -129,9 +129,11 @@ class Observation(
         )
 
     @staticmethod
-    def from_MAST(targetname, **kwargs):
+    def from_MAST(targetname, download_dir=None, radius="10 arcsec", **kwargs):
         """Download a target from MAST"""
-        paths = np.asarray(download_target(targetname))
+        paths = np.asarray(
+            download_target(targetname, radius=radius, download_dir=download_dir)
+        )
         return Observation.from_files(paths, **kwargs)
 
     @property
