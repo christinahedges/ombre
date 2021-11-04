@@ -10,7 +10,7 @@ import warnings
 
 from astropy.io import fits, votable
 from astropy.time import Time
-from astropy.stats import sigma_clipped_stats
+from astropy.stats import sigma_clipped_stats, sigma_clip
 import astropy.units as u
 from astropy.convolution import convolve, Box2DKernel
 from . import PACKAGEDIR
@@ -231,7 +231,9 @@ class Visit(object):
 
         bkg = sigma_clipped_stats(
             np.ma.masked_array(
-                self.sci, larger_mask[None, :, :] * np.ones(self.sci.shape, bool)
+                self.sci,
+                larger_mask[None, :, :] * np.ones(self.sci.shape, bool)
+                & (self.sci[0] != 0),
             ),
             axis=(1, 2),
             sigma=3,
@@ -246,6 +248,8 @@ class Visit(object):
         t0: Optional[float] = None,
         period: Optional[float] = None,
         planet_letter: str = "b",
+        force=False,
+        pixel_mask=None,
     ):
         """Create a visit from multiple files
 
@@ -286,6 +290,7 @@ class Visit(object):
             raise ValueError("More than one proposal id in files.")
         filters = np.asarray([hdr["FILTER"] for hdr in hdrs])
         mask = (filters == "G141") | (filters == "G102")
+
         convert_time = lambda hdr: (
             Time(
                 datetime.strptime(
@@ -312,15 +317,16 @@ class Visit(object):
         postarg1 = np.asarray([hdr["POSTARG1"] for hdr in hdrs])
         postarg2 = np.asarray([hdr["POSTARG2"] for hdr in hdrs])
         if forward:
-            mask = postarg2 > 0
+            mask &= postarg2 > 0
         else:
-            mask = postarg2 <= 0
+            mask &= postarg2 <= 0
+        hdrs = [hdr for m, hdr in zip(mask, hdrs) if m]
         if not np.any(mask):
             raise ValueError("No files exist with that direction")
 
         sci, err, dq = [], [], []
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
-
+        time = time[mask]
         for jdx, file in enumerate(filenames[mask]):
             with fits.open(file, cache=False, memmap=False) as hdulist:
                 sci.append(hdulist[1].data)
@@ -331,36 +337,56 @@ class Visit(object):
                     err[jdx] /= hdulist[1].header["SAMPTIME"]
                 err[jdx][(dq[jdx] & qmask) != 0] = 1e10
 
-        for sci1 in sci:
-            if (sci1 > 100).sum() < 2000:
+        if pixel_mask is not None:
+            sci = [s * pixel_mask for s in sci]
+
+        bright_pix = np.asarray([(sci1 > 100).sum() for sci1 in sci])
+        if not force:
+            if (bright_pix < 2000).any():
                 raise ValueError("Not enough flux on target")
+        else:
+            bright_pix_mask = bright_pix > 100
+            time = time[bright_pix_mask]
+            sci = list(np.asarray(sci)[bright_pix_mask])
+            err = list(np.asarray(err)[bright_pix_mask])
+            dq = list(np.asarray(dq)[bright_pix_mask])
 
         X, Y = np.mgrid[: sci[0].shape[0], : sci[0].shape[1]]
         xs, ys = np.asarray(
             [
-                [np.average(X, weights=s * (s > 100)) for s in sci],
-                [np.average(Y, weights=s * (s > 100)) for s in sci],
+                [np.average(X, weights=s) for s in sci],
+                [np.average(Y, weights=s) for s in sci],
             ]
         )
         arclength = np.hypot(xs - xs.min(), ys - ys.min())
-        if (arclength > 5).any():
-            raise ValueError("Lost fine point")
+        arclength -= np.median(arclength)
+        if (np.abs(arclength) > 5).any():
+            if not force:
+                raise ValueError("Lost fine point")
+            else:
+                arclength_mask = np.abs(arclength) < 5
+                time = time[arclength_mask]
+                sci = list(np.asarray(sci)[arclength_mask])
+                err = list(np.asarray(err)[arclength_mask])
+                dq = list(np.asarray(dq)[arclength_mask])
 
-        if (
-            np.nanmean(sci, axis=(0, 2)) > np.nanmean(sci, axis=(0, 2)).max() * 0.9
-        ).sum() < 4:
-            raise ValueError("Stare mode")
-        s = np.argsort(time[mask])
+        if not force:
+            if (
+                np.nanmean(sci, axis=(0, 2)) > np.nanmean(sci, axis=(0, 2)).max() * 0.9
+            ).sum() < 4:
+                raise ValueError("Stare mode")
+
+        s = np.argsort(time)
         return Visit(
             sci=np.asarray(sci)[s],
             err=np.asarray(err)[s],
             dq=np.asarray(dq)[s],
-            time=time[mask][s],
+            time=time[s],
             exptime=hdrs[0]["EXPTIME"],
             name=hdrs[0]["TARGNAME"],
             forward=forward,
             propid=hdrs[0]["PROPOSID"],
-            filenames=filenames[mask][s],
+            filenames=filenames,
             filter=hdrs[0]["FILTER"],
             visit_number=visit_number,
             ra=hdrs[0]["RA_TARG"],
@@ -463,8 +489,13 @@ class Visit(object):
             (1 / nt) * np.nansum(((self.error / norm / self.model)) ** 2, axis=0) ** 0.5
         )[np.ones((nrow, ncol), bool)]
 
-        sigma_w_inv = np.dot(X.T, X / avg_err[:, None] ** 2)
-        B = np.dot(X.T, (avg / avg_err ** 2)[:, None])
+        sigma_w_inv = np.dot(X.T, X / avg_err[:, None] ** 2) + np.diag(
+            1 / (np.ones(5) * 1e10)
+        )
+        B = (
+            np.dot(X.T, (avg / avg_err ** 2)[:, None])
+            + np.asarray([1, 0, 0, 0, 0]) / 1e10
+        )
         w = np.linalg.solve(sigma_w_inv, B)[:, 0]
 
         X = f[:, np.ones((self.ns, self.ns), bool)].T
@@ -494,7 +525,7 @@ class Visit(object):
             [(self.time - self.time.mean()) ** idx for idx in np.arange(3)[::-1]]
         )
 
-        return np.vstack(
+        A = np.vstack(
             [
                 self.xshift,
                 self.yshift,
@@ -505,7 +536,20 @@ class Visit(object):
             ]
         ).T
 
-    def fit_transit(self):
+        shift_check = np.hypot(np.diff(self.xshift), np.diff(self.yshift))
+        shifted = sigma_clip(shift_check, sigma=5).mask
+        if shifted.sum() == 1:
+            break_point = np.where(shifted)[0][0] + 1
+
+            A2 = np.zeros((A.shape[0], A.shape[1] * 2))
+            A2[:break_point, : A.shape[1]] = A[:break_point]
+            A2[break_point:, A.shape[1] :] = A[break_point:]
+            return A2
+        elif shifted.sum() > 1:
+            raise ValueError("Found there are multiple point adjustments?")
+        return A
+
+    def fit_transit(self, **kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self._pymc3_model, self.map_soln = fit_transit(
@@ -522,6 +566,7 @@ class Visit(object):
                 A=self.A,
                 offsets=self.A[:, -1][:, None],
                 subtime=self._subtime,
+                **kwargs,
             )
         self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
             (self.nt, self.nsp)

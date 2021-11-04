@@ -41,6 +41,8 @@ def get_nexsci(input, letter="b", **kwargs):
         raise URLError(
             "Can not access the internet to query NExSci for exoplanet parameters."
         )
+    except IndexError:
+        return 0, 0, 0, 0, 90, 0, 0, 6000
 
     radius *= u.earthRad.to(u.solRad)
     return period, t0, duration, radius, incl, st_rad, st_mass, st_teff
@@ -82,7 +84,7 @@ def download_target(targetname, radius="10 arcsec", download_dir=None):
     log.info("Found {} files.".format(len(obsTable)))
     paths = []
     for idx, t in enumerate(
-        tqdm(obsTable, desc="Downloading files", total=len(obsTable))
+        tqdm(obsTable, desc=f"Downloading files ({targetname}) ", total=len(obsTable))
     ):
         if os.path.isfile(fnames[idx]):
             paths.append(fnames[idx])

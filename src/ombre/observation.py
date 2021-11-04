@@ -91,7 +91,9 @@ class Observation(
         return self.visits[s]
 
     @staticmethod
-    def from_files(fnames: List[str], planet_letter="b", **kwargs):
+    def from_files(
+        fnames: List[str], planet_letter="b", pixel_mask=None, force=False, **kwargs
+    ):
         """Make an Observation from files"""
         fnames = np.sort(fnames)
         times = []
@@ -119,7 +121,11 @@ class Observation(
                 try:
                     visits.append(
                         Visit.from_files(
-                            fnames[mask], forward=direction, visit_number=idx + 1
+                            fnames[mask],
+                            forward=direction,
+                            visit_number=idx + 1,
+                            force=force,
+                            pixel_mask=pixel_mask,
                         )
                     )
                 except ValueError:
@@ -232,10 +238,14 @@ class Observation(
                     plt.scatter(
                         self.phase, self.map_soln["transit"] + 1, s=2, label="Transit"
                     )
-                if self.map_soln["eclipse"].sum() != 0:
-                    plt.scatter(
-                        self.phase, self.map_soln["eclipse"] + 1, s=2, label="Eclipse"
-                    )
+                if "eclipse" in self.map_soln.keys():
+                    if self.map_soln["eclipse"].sum() != 0:
+                        plt.scatter(
+                            self.phase,
+                            self.map_soln["eclipse"] + 1,
+                            s=2,
+                            label="Eclipse",
+                        )
             ax.legend()
         return ax
 
@@ -268,8 +278,10 @@ class Observation(
                 subtime=self._subtime,
                 **kwargs,
             )
-        self.period = self.map_soln["period"]
-        self.t0 = self.map_soln["t0"]
+        if "period" in self.map_soln.keys():
+            self.period = self.map_soln["period"]
+        if "t0" in self.map_soln.keys():
+            self.t0 = self.map_soln["t0"]
         for idx in range(len(self)):
             self[idx].no_limb_transit_subtime = self.map_soln[
                 "no_limb_transit_subtime"
@@ -277,14 +289,49 @@ class Observation(
             self[idx].transit_subtime = self.map_soln["transit_subtime"][
                 self._subtime_idxs == idx
             ].reshape((self[idx].nt, self[idx].nsp))
-            self[idx].eclipse_subtime = self.map_soln["eclipse_subtime"][
-                self._subtime_idxs == idx
-            ].reshape((self[idx].nt, self[idx].nsp))
+            if "eclipse_subtime" in self.map_soln.keys():
+                self[idx].eclipse_subtime = self.map_soln["eclipse_subtime"][
+                    self._subtime_idxs == idx
+                ].reshape((self[idx].nt, self[idx].nsp))
+            else:
+                self[idx].eclipse_subtime = np.zeros_like(self[idx].transit_subtime)
             self[idx].transit = self.map_soln["transit"][self._time_idxs == idx]
-            self[idx].eclipse = self.map_soln["eclipse"][self._time_idxs == idx]
+            if "eclipse" in self.map_soln.keys():
+                self[idx].eclipse = self.map_soln["eclipse"][self._time_idxs == idx]
+            else:
+                self[idx].eclipse = np.zeros_like(self[idx].transit)
             self[idx].noise_model = self.map_soln["noise_model"][self._time_idxs == idx]
             self[idx].period = self.period
             self[idx].t0 = self.t0
+
+    def copy_transit_fit(self, other):
+        """Copy the properties of one Observation transit fit to another"""
+        self._pymc3_model, self.map_soln = other._pymc3_model, other.map_soln
+        self.period = other.map_soln["period"]
+        self.t0 = other.map_soln["t0"]
+        for idx in range(len(self)):
+            self[idx].no_limb_transit_subtime = other.map_soln[
+                "no_limb_transit_subtime"
+            ][other._subtime_idxs == idx].reshape((other[idx].nt, other[idx].nsp))
+            self[idx].transit_subtime = other.map_soln["transit_subtime"][
+                other._subtime_idxs == idx
+            ].reshape((other[idx].nt, other[idx].nsp))
+            if "eclipse_subtime" in other.map_soln.keys():
+                self[idx].eclipse_subtime = other.map_soln["eclipse_subtime"][
+                    other._subtime_idxs == idx
+                ].reshape((other[idx].nt, other[idx].nsp))
+            else:
+                self[idx].eclipse_subtime = np.zeros_like(self[idx].transit_subtime)
+            self[idx].transit = other.map_soln["transit"][other._time_idxs == idx]
+            if "eclipse" in other.map_soln.keys():
+                self[idx].eclipse = other.map_soln["eclipse"][other._time_idxs == idx]
+            else:
+                self[idx].eclipse = np.zeros_like(self[idx].transit)
+            self[idx].noise_model = other.map_soln["noise_model"][
+                other._time_idxs == idx
+            ]
+            self[idx].period = other.period
+            self[idx].t0 = other.t0
 
     @property
     def oot(self):

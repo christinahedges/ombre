@@ -103,7 +103,7 @@ class Spectrum(object):
         """Spectrum as an astropy.table.Table object"""
         return Table(
             [
-                (self.wavelength / 1e4) * u.micron,
+                (self.wavelength) * u.micron,
                 self.spec * ppm,
                 self.spec_err * ppm,
             ],
@@ -152,6 +152,24 @@ class Spectrum(object):
             plt.xlabel("Wavelength")
             plt.ylabel("$\delta$ Transit Depth [ppm]")
         return ax
+
+    @staticmethod
+    def from_file(fname, ext=1):
+        hdu = fits.open(fname)
+        keys = np.asarray(list(hdu[ext].header.keys()))
+        keys = keys[np.where(keys == "DEPTH")[0][0] + 1 :]
+        meta = {key.lower(): hdu[ext].header[key] for key in keys}
+        self = Spectrum(
+            hdu[ext].data["wavelength"],
+            hdu[ext].data["spectrum"],
+            hdu[ext].data["spectrum_err"],
+            visit=hdu[ext].header["VISIT"],
+            name=hdu[ext].header["NAME"],
+            depth=hdu[ext].header["DEPTH"],
+            meta=meta,
+        )
+
+        return self
 
     @property
     def hdu(self):
@@ -219,6 +237,8 @@ class Spectra(object):
     def __getitem__(self, s: int):
         if len(self.spec) == 0:
             raise ValueError("Empty Spectra")
+        if hasattr(s, "__iter__"):
+            return Spectra([self.spec[s1] for s1 in s])
         return self.spec[s]
 
     def __repr__(self):
@@ -262,6 +282,7 @@ class Spectra(object):
             np.hstack([spec.spec for spec in self]),
             np.hstack([spec.spec_err for spec in self]),
             name=self[0].name,
+            depth=self[0].depth,
             meta=self[0].meta,
             visit=self[0].visit,
         )
@@ -293,3 +314,24 @@ class Spectra(object):
         for spec in self:
             hdulist.append(spec.hdu)
         return fits.HDUList(hdulist)
+
+    @staticmethod
+    def from_file(fname):
+        with fits.open(fname) as hdu:
+            specs = []
+            for ext in np.arange(1, len(hdu)):
+                keys = np.asarray(list(hdu[ext].header.keys()))
+                keys = keys[np.where(keys == "DEPTH")[0][0] + 1 :]
+                meta = {key.lower(): hdu[ext].header[key] for key in keys}
+                specs.append(
+                    Spectrum(
+                        hdu[ext].data["wavelength"],
+                        hdu[ext].data["spectrum"],
+                        hdu[ext].data["spectrum_err"],
+                        visit=hdu[ext].header["VISIT"],
+                        name=hdu[ext].header["NAME"],
+                        depth=hdu[ext].header["DEPTH"],
+                        meta=meta,
+                    )
+                )
+        return Spectra(specs, specs[0].name)
