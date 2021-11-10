@@ -82,11 +82,23 @@ class Spectrum(object):
             bins = np.linspace(0.8, 1.7, 100)
         y, ye = np.zeros(len(bins) - 1) * np.nan, np.zeros(len(bins) - 1) * np.nan
         for idx in range(len(bins) - 1):
-            k = (self.wavelength > bins[idx]) & (self.wavelength <= bins[idx + 1])
+            k = (
+                (self.wavelength > bins[idx])
+                & (self.wavelength <= bins[idx + 1])
+                & (np.isfinite(self.spec))
+            )
             if k.sum() == 0:
                 continue
-            y[idx] = np.median(self.spec[k])
-            ye[idx] = np.sum(self.spec_err[k] ** 2) ** 0.5 / k.sum()
+            if np.nansum(self.spec_err) == 0:
+                y[idx] = np.average(self.spec[k])
+                ye[idx] = np.average((self.spec[k] - y[idx]) ** 2) ** 0.5 / (
+                    k.sum() ** 0.5
+                )
+            else:
+                y[idx] = np.average(self.spec[k], weights=1 / self.spec_err[k])
+                ye[idx] = np.average(
+                    (self.spec[k] - y[idx]) ** 2, weights=1 / self.spec_err[k]
+                ) ** 0.5 / (k.sum() ** 0.5)
         bins = bins[:-1] + np.median(np.diff(bins)) / 2
         return Spectrum(
             bins,

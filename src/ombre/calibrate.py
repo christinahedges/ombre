@@ -68,11 +68,13 @@ def wavelength_calibrate(visit):
         wav.value,
         sens_raw,
     )
+    sensitivity_raw = sensitivity.copy()
     sensitivity /= np.median(sensitivity)
     return (
         wavelength[~visit.trace_mask],
         sensitivity[~visit.trace_mask],
         sensitivity_t[~visit.trace_mask],
+        sensitivity_raw[~visit.trace_mask],
     )
 
 

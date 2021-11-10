@@ -187,12 +187,8 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
         Number of samples to draw for each spectrum
     """
 
-    meta = {
-        "propid": visit.propid,
-        "tstart": visit.time[0],
-        "tend": visit.time[-1],
-        "ntime": len(visit.time),
-    }
+    meta = visit.meta
+
     if spline:
         spline1 = lk.designmatrix.create_sparse_spline_matrix(
             visit.X[0, 0], n_knots=nknots

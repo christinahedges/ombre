@@ -27,20 +27,32 @@ class Observation(
     t0: [Optional] = None
     duration: [Optional] = None
     radius: [Optional] = None
+    mass: [Optional] = None
     incl: [Optional] = None
     st_rad: [Optional] = None
     st_mass: [Optional] = None
     st_teff: [Optional] = None
 
     def __post_init__(self):
-        period, t0, duration, radius, incl, st_rad, st_mass, st_teff = get_nexsci(
-            self, letter=self.planet_letter
-        )
+        (
+            period,
+            t0,
+            duration,
+            radius,
+            mass,
+            incl,
+            st_rad,
+            st_mass,
+            st_teff,
+            dist,
+        ) = get_nexsci(self, letter=self.planet_letter)
+        self.dist = dist
         (
             self.period,
             self.t0,
             self.duration,
             self.radius,
+            self.mass,
             self.incl,
             self.st_rad,
             self.st_mass,
@@ -50,6 +62,7 @@ class Observation(
             [self.t0 if self.t0 is not None else t0][0],
             [self.duration if self.duration is not None else duration][0],
             [self.radius if self.radius is not None else radius][0],
+            [self.mass if self.mass is not None else mass][0],
             [self.incl if self.incl is not None else incl][0],
             [self.st_rad if self.st_rad is not None else st_rad][0],
             [self.st_mass if self.st_mass is not None else st_mass][0],
@@ -61,19 +74,23 @@ class Observation(
                 self[idx].t0,
                 self[idx].duration,
                 self[idx].radius,
+                self[idx].mass,
                 self[idx].incl,
                 self[idx].st_rad,
                 self[idx].st_mass,
                 self[idx].st_teff,
+                self[idx].dist,
             ) = (
                 self.period,
                 self.t0,
                 self.duration,
                 self.radius,
+                self.mass,
                 self.incl,
                 self.st_rad,
                 self.st_mass,
                 self.st_teff,
+                self.dist,
             )
         for visit in self:
             visit.calibrate()
@@ -191,6 +208,30 @@ class Observation(
         return self.A[
             :, self.A.shape[1] // len(self) - 1 :: self.A.shape[1] // len(self)
         ]
+
+    @property
+    def meta(self):
+        return {
+            attr: [
+                getattr(self, attr)
+                if not hasattr(getattr(self, attr), "__iter__")
+                else float(getattr(self, attr))
+            ][0]
+            for attr in [
+                "ra",
+                "dec",
+                "period",
+                "t0",
+                "duration",
+                "radius",
+                "mass",
+                "incl",
+                "st_rad",
+                "st_mass",
+                "st_teff",
+                "dist",
+            ]
+        }
 
     def plot(self, ax: Optional[plt.Axes] = None, **kwargs) -> plt.Axes:
         """Create a plot of the `Observation`.
@@ -373,10 +414,11 @@ class Observation(
             for visit in self:
                 if visit.filter != filter:
                     continue
-                spec = visit.average_spectrum[0, 0, :] / visit.sensitivity
-                c = np.mean(spec)
+                # spec = visit.average_spectrum[0, 0, :] / visit.sensitivity
+                # c = np.mean(spec)
+                spec = visit.total_spectrum
                 w.append(visit.wavelength)
-                y.append(spec / c)
+                y.append(spec)
                 ye.append(np.zeros(visit.nwav))
             if len(w) > 0:
                 w, y, ye = np.hstack(w), np.hstack(y), np.hstack(ye)
@@ -388,6 +430,7 @@ class Observation(
                         ye[s],
                         name=f"{self.name} Normalized Stellar Spectrum",
                         visit=filter,
+                        meta=self.meta,
                     )
                 )
         return Spectra(spectra, name=f"{self.name} Stellar Spectrum")

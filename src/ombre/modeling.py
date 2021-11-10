@@ -32,6 +32,7 @@ def fit_transit(
     x_suppl=np.empty(0),
     y_suppl=np.empty(0),
     yerr_suppl=np.empty(0),
+    u_suppl=None,
     exptime_suppl=None,
     calc_eclipse=True,
 ):
@@ -82,22 +83,28 @@ def fit_transit(
                 period = period_val
 
             # The Kipping (2013) parameterization for quadratic limb darkening paramters
-            u_suppl = xo.distributions.QuadLimbDark(
-                "u_suppl", testval=np.array([0.3, 0.2])
-            )
-            u = xo.distributions.QuadLimbDark("u", testval=np.array([0.3, 0.2]))
+            if u_suppl is None:
+                u_suppl = xo.distributions.QuadLimbDark(
+                    "u_suppl", testval=np.array([0.4412, 0.2312])
+                )
+            u = xo.distributions.QuadLimbDark("u", testval=np.array([0.4412, 0.2312]))
 
             r_star_pm = pm.Normal(
-                "r_star", mu=r_star, sigma=0.1 * r_star, testval=r_star
+                "r_star", mu=r_star, sigma=0.2 * r_star, testval=r_star
             )
             m_star_pm = pm.Normal(
-                "m_star", mu=m_star, sigma=0.1 * m_star, testval=m_star
+                "m_star", mu=m_star, sigma=0.2 * m_star, testval=m_star
             )
             r = pm.Uniform("r", lower=r_val * 0.1, upper=r_val * 10, testval=r_val)
             ror = pm.Deterministic("ror", r / r_star_pm)
             #        b = xo.ImpactParameter("b", ror=ror)
             if fit_inc:
-                inc = pm.Normal("inc", mu=inc_val, sigma=0.1, testval=inc_val)
+                inc = pm.Uniform(
+                    "inc",
+                    lower=np.deg2rad(70),
+                    upper=np.deg2rad(90),
+                    testval=inc_val - 1e-5,
+                )
             else:
                 inc = inc_val
 
@@ -239,32 +246,28 @@ def fit_transit(
                     )
 
             map_soln = model.test_point
+            vars = [r]
+            for key in ["period", "t0", "inc"]:
+                if locals()[f"fit_{key}"]:
+                    vars.append(locals()[f"{key}"])
             if len(y_suppl) != 0:
-                if fit_t0 | fit_period:
-                    map_soln = pmx.optimize(
-                        start=map_soln, vars=[t0, period, r_suppl], verbose=False
-                    )
-                else:
-                    map_soln = pmx.optimize(
-                        start=map_soln, vars=[r_suppl], verbose=False
-                    )
-            else:
-                if fit_t0 | fit_period:
-                    map_soln = pmx.optimize(
-                        start=map_soln, vars=[t0, period], verbose=False
-                    )
+                if not isinstance(u_suppl, list):
+                    vars.append(u_suppl)
+                vars.append(r_suppl)
+            map_soln = pmx.optimize(
+                start=map_soln,
+                vars=vars,
+                verbose=False,
+            )
+
+            vars = [r, u]
+
             if calc_eclipse:
-                map_soln = pmx.optimize(
-                    start=map_soln,
-                    verbose=False,
-                    vars=[r, eclipse_r, u],
-                )
-            else:
-                map_soln = pmx.optimize(
-                    start=map_soln,
-                    verbose=False,
-                    vars=[r, u],
-                )
-            #        map_soln = pmx.optimize(start=map_soln, verbose=True, vars=[hook])
+                vars.append(eclipse_r)
+            map_soln = pmx.optimize(
+                start=map_soln,
+                verbose=False,
+                vars=vars,
+            )
             map_soln = pmx.optimize(start=map_soln, verbose=False)
             return model, map_soln

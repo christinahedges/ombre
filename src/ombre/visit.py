@@ -163,6 +163,7 @@ class Visit(object):
                 self.wavelength,
                 self.sensitivity,
                 self.sensitivity_t,
+                self.sensitivity_raw,
             ) = wavelength_calibrate(self)
 
         if self.filter == "G141":
@@ -190,8 +191,9 @@ class Visit(object):
             "T",
             "X",
             "Y",
-            "wavelength",
             "sensitivity",
+            "sensitivity_raw",
+            "wavelength",
         ]
 
         mask = np.in1d(np.arange(self.nwav), np.arange(lower, upper))
@@ -208,6 +210,9 @@ class Visit(object):
         w[self.err / self.sci > 0.1] = 1e10
 
         larger_mask = convolve(self.mask[0], Box2DKernel(31)) > 1e-5
+        if larger_mask[:, -1].sum() != 0:
+            larger_mask[:, -5:] |= False
+
         thumb = np.average(self.sci / self.flat, weights=self.flat / self.err, axis=0)
         l = np.where(larger_mask.any(axis=0))[0]
         thumb = thumb[:, l[0] : l[-1] + 1]
@@ -342,29 +347,30 @@ class Visit(object):
 
         bright_pix = np.asarray([(sci1 > 100).sum() for sci1 in sci])
         if not force:
-            if (bright_pix < 2000).any():
+            if (bright_pix < 1000).any():
                 raise ValueError("Not enough flux on target")
-        else:
-            bright_pix_mask = bright_pix > 100
-            time = time[bright_pix_mask]
-            sci = list(np.asarray(sci)[bright_pix_mask])
-            err = list(np.asarray(err)[bright_pix_mask])
-            dq = list(np.asarray(dq)[bright_pix_mask])
+        #        else:
+        # bright_pix_mask = bright_pix > 100
+        # time = time[bright_pix_mask]
+        # sci = list(np.asarray(sci)[bright_pix_mask])
+        # err = list(np.asarray(err)[bright_pix_mask])
+        # dq = list(np.asarray(dq)[bright_pix_mask])
 
         X, Y = np.mgrid[: sci[0].shape[0], : sci[0].shape[1]]
         xs, ys = np.asarray(
             [
-                [np.average(X, weights=s) for s in sci],
-                [np.average(Y, weights=s) for s in sci],
+                [np.average(X[s >= 5], weights=s[s >= 5]) for s in sci],
+                [np.average(Y[s >= 5], weights=s[s >= 5]) for s in sci],
             ]
         )
+
         arclength = np.hypot(xs - xs.min(), ys - ys.min())
         arclength -= np.median(arclength)
         if (np.abs(arclength) > 5).any():
             if not force:
                 raise ValueError("Lost fine point")
             else:
-                arclength_mask = np.abs(arclength) < 5
+                arclength_mask = ~sigma_clip(arclength).mask
                 time = time[arclength_mask]
                 sci = list(np.asarray(sci)[arclength_mask])
                 err = list(np.asarray(err)[arclength_mask])
@@ -408,6 +414,21 @@ class Visit(object):
         return (
             np.atleast_3d(spec_mean) * np.ones(self.shape).transpose([0, 2, 1])
         ).transpose([0, 2, 1])
+
+    @property
+    def total_spectrum(self):
+        avg = np.atleast_3d(self.average_vsr)
+        oot = self.oot
+        d1 = self.data[oot] / avg
+        e1 = self.error[oot] / avg
+        spec_mean = np.average(d1, axis=0, weights=e1)
+        e = np.average((d1 - spec_mean) ** 2, axis=0, weights=e1) ** 0.5
+        e /= oot.sum() ** 0.5
+        spec_mean = spec_mean.sum(axis=0) * u.electron
+        e = (e ** 2).sum(axis=0) ** 0.5 * u.electron
+        spec_mean *= 1 / (self.exptime * u.second * u.Angstrom * self.sensitivity_raw)
+        e *= 1 / (self.exptime * u.second * u.Angstrom * self.sensitivity_raw)
+        return spec_mean, e
 
     @property
     def _basic_vsr(self):
@@ -459,6 +480,35 @@ class Visit(object):
     @property
     def residuals(self):
         return self.data - (self.average_lc[:, None, None] * self.model)
+
+    @property
+    def meta(self):
+        meta = {
+            attr: [
+                getattr(self, attr)
+                if not hasattr(getattr(self, attr), "__iter__")
+                else float(getattr(self, attr))
+            ][0]
+            for attr in [
+                "ra",
+                "dec",
+                "period",
+                "t0",
+                "duration",
+                "radius",
+                "mass",
+                "incl",
+                "st_rad",
+                "st_mass",
+                "st_teff",
+                "propid",
+                "dist",
+            ]
+        }
+        meta["tstart"] = self.time[0]
+        meta["tend"] = self.time[-1]
+        meta["ntime"] = len(self.time)
+        return meta
 
     def get_flatfield(self):
         """ Get flat field of the data by fitting components in HST calibration files"""
@@ -522,31 +572,51 @@ class Visit(object):
         )
 
         poly = np.vstack(
-            [(self.time - self.time.mean()) ** idx for idx in np.arange(3)[::-1]]
+            [(self.time - self.time.mean()) ** idx for idx in np.arange(2)[::-1]]
         )
 
         A = np.vstack(
             [
+                hook_model,
                 self.xshift,
+                np.gradient(self.xshift, self.time),
                 self.yshift,
+                np.gradient(self.yshift, self.time),
                 self.xshift * self.yshift,
                 self.bkg,
-                hook_model,
                 poly,
             ]
         ).T
 
-        shift_check = np.hypot(np.diff(self.xshift), np.diff(self.yshift))
-        shifted = sigma_clip(shift_check, sigma=5).mask
-        if shifted.sum() == 1:
-            break_point = np.where(shifted)[0][0] + 1
+        def shift_check(time, xshift, yshift):
+            """Find points where the telescope shifted during an observation."""
+            dt = np.median(np.diff(time))
+            k = np.where(np.diff(time) / dt > 3)[0] + 1
+            t, x, y = np.asarray(
+                [
+                    (t[0], x.mean(), y.mean())
+                    for t, x, y in zip(
+                        np.array_split(time, k),
+                        np.array_split(xshift, k),
+                        np.array_split(yshift, k),
+                    )
+                ]
+            ).T
+            v = np.hypot(np.diff(x) / np.diff(t), np.diff(y) / np.diff(t))
+            mask = sigma_clip(v, sigma=3).mask
+            if not mask.any():
+                return None
+            if mask.sum() > 1:
+                mask = np.in1d(v, np.max(v[mask]))
+            return np.where(np.in1d(time, t[1:][mask]))[0][0]
 
-            A2 = np.zeros((A.shape[0], A.shape[1] * 2))
-            A2[:break_point, : A.shape[1]] = A[:break_point]
-            A2[break_point:, A.shape[1] :] = A[break_point:]
+        break_point = shift_check(self.time, self.xshift, self.yshift)
+        if break_point is not None:
+            A2 = np.zeros((A.shape[0], A.shape[1] * 2 - 1))
+            A2[:break_point, 1 : A.shape[1]] = A[:break_point, 1:]
+            A2[break_point:, A.shape[1] : (A.shape[1]) * 2 - 1] = A[break_point:, 1:]
+            A2[:, :1] = A[:, :1]
             return A2
-        elif shifted.sum() > 1:
-            raise ValueError("Found there are multiple point adjustments?")
         return A
 
     def fit_transit(self, **kwargs):
@@ -969,13 +1039,15 @@ def simple_mask(
     # Cut out the zero phase dispersion!
     # Choose the widest block as the true dispersion...
     secs = mask[0].any(axis=0).astype(int)
-    len_secs = np.diff(np.where(np.gradient(secs) != 0)[0][::2] + 1)[::2]
-    if len(len_secs) > 1:
-        mask[:, :, : np.where(np.gradient(secs) > 0)[0][3]] &= False
-        spectral = mask[0].any(axis=0)
-
+    sec_l = np.hstack([0, np.where(np.gradient(secs) != 0)[0][::2] + 1, mask.shape[1]])
+    dsec_l = np.diff(sec_l)
+    msec_l = np.asarray([s.mean() for s in np.array_split(secs, sec_l[1:-1])])
+    l = sec_l[np.argmax(dsec_l * msec_l) : np.argmax(dsec_l * msec_l) + 2]
+    m = np.zeros(mask.shape[1:], bool)
+    m[:, l[0] : l[1]] = True
+    mask[0] &= m
     return (
         mask,
-        np.atleast_3d(np.atleast_2d(spectral)).transpose([2, 0, 1]),
+        np.atleast_3d(np.atleast_2d(spectral * m[0])).transpose([2, 0, 1]),
         np.atleast_3d(np.atleast_2d(spatial.T)).transpose([2, 1, 0]),
     )

@@ -30,6 +30,9 @@ line-profiler = "^3.3.0"
 mkdocs-jupyter = "^0.17.3"
 nbterm = "^0.0.11"
 nbclient = "^0.5.3"
+mkdocs-encryptcontent-plugin = "^1.2.2"
+nbconvert = "^6.2.0"
+ads = "^0.12.3"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
