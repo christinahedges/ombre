@@ -59,11 +59,12 @@ def fit_transit(
         logger = logging.getLogger("theano.tensor.opt")
         logger.setLevel(logging.ERROR)
 
+        if not np.isfinite(np.vstack([x_suppl, y_suppl, yerr_suppl])).all():
+            raise ValueError("Must pass finite values to `fit_transit`")
+
         with pm.Model() as model:
             if len(x_suppl) > 0:
-                norm_suppl = pm.Normal(
-                    "norm_suppl", mu=y_suppl.mean(), sigma=y_suppl.std(), shape=1
-                )
+                norm_suppl = pm.Normal("norm_suppl", mu=1, sigma=0.1, shape=1)
 
             # The time of a reference transit for each planet
             if fit_t0:
@@ -244,7 +245,6 @@ def fit_transit(
                         sigma=tt.concatenate([yerr_suppl, yerr]),
                         observed=(tt.concatenate([y_suppl, y])),
                     )
-
             map_soln = model.test_point
             vars = [r]
             for key in ["period", "t0", "inc"]:
@@ -254,20 +254,20 @@ def fit_transit(
                 if not isinstance(u_suppl, list):
                     vars.append(u_suppl)
                 vars.append(r_suppl)
+
             map_soln = pmx.optimize(
                 start=map_soln,
                 vars=vars,
-                verbose=False,
+                verbose=True,
             )
 
             vars = [r, u]
-
             if calc_eclipse:
                 vars.append(eclipse_r)
             map_soln = pmx.optimize(
                 start=map_soln,
-                verbose=False,
+                verbose=True,
                 vars=vars,
             )
-            map_soln = pmx.optimize(start=map_soln, verbose=False)
+            map_soln = pmx.optimize(start=map_soln, verbose=True)
             return model, map_soln

@@ -8,6 +8,7 @@ import astropy.units as u
 import lightkurve as lk
 
 from .spec import Spectrum, Spectra
+from lightkurve.units import ppm
 
 
 def vstack_list(dms):
@@ -116,7 +117,7 @@ def build_noise_matrix(visit):
     return Anames_all, As
 
 
-def build_transit_matrix(visit, spline=False, nknots=30):
+def build_transit_matrix(visit, spline=False, nknots=30, knots=None, degree=3):
 
     no_ld_t = visit.no_limb_transit_subtime
     ld = visit.transit_subtime - no_ld_t
@@ -125,9 +126,11 @@ def build_transit_matrix(visit, spline=False, nknots=30):
         transit1 = vstack_independent(no_ld_t.ravel()[:, None], visit.nwav)
         eclipse1 = vstack_independent(eclipse.ravel()[:, None], visit.nwav)
     else:
-
         spline1 = lk.designmatrix.create_sparse_spline_matrix(
-            visit.X[0, 0], n_knots=nknots
+            visit.X[0, 0],
+            n_knots=nknots,
+            knots=knots,
+            degree=degree,
         ).X
         spline = sparse.lil_matrix(
             (visit.nt * visit.nsp * visit.nwav, spline1.shape[1])
@@ -225,7 +228,6 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
         w = np.linalg.solve(sigma_w_inv, B)
         werr = sigma_w.diagonal() ** 0.5
         k &= np.abs(((y - y.mean()) - As.dot(w)) / yerr) < 5
-
     td = np.abs(visit.no_limb_transit_subtime.min())
     ed = np.abs(visit.eclipse_subtime.min())
     oot_flux = np.median(visit.average_lc[oot])
@@ -233,18 +235,18 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
     # Package up result:
     if not spline:
         visit.transmission_spectrum = Spectrum(
-            visit.wavelength.to(u.micron).value,
-            1e6 * td * w[: visit.nwav] / oot_flux,
-            1e6 * td * werr[: visit.nwav] / oot_flux,
+            visit.wavelength.to(u.micron),
+            1e6 * td * w[: visit.nwav] / oot_flux * ppm,
+            1e6 * td * werr[: visit.nwav] / oot_flux * ppm,
             depth=td,
             name=visit.name + " Transmission Spectrum",
             visit=visit.visit_number,
             meta=meta,
         )
         visit.emission_spectrum = Spectrum(
-            visit.wavelength.to(u.micron).value,
-            1e6 * ed * w[visit.nwav : 2 * visit.nwav] / oot_flux,
-            1e6 * ed * werr[visit.nwav : 2 * visit.nwav] / oot_flux,
+            visit.wavelength.to(u.micron),
+            1e6 * ed * w[visit.nwav : 2 * visit.nwav] / oot_flux * ppm,
+            1e6 * ed * werr[visit.nwav : 2 * visit.nwav] / oot_flux * ppm,
             depth=ed,
             name=visit.name + " Emission Spectrum",
             visit=visit.visit_number,
@@ -256,9 +258,9 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
         visit.transmission_spectrum_draws = Spectra(
             [
                 Spectrum(
-                    visit.wavelength.to(u.micron).value,
-                    s1,
-                    tse,
+                    visit.wavelength.to(u.micron),
+                    s1 * ppm,
+                    tse * ppm,
                     depth=td,
                     name=visit.name + " Transmission Spectrum",
                     visit=visit.visit_number,
@@ -278,9 +280,9 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
         visit.emission_spectrum_draws = Spectra(
             [
                 Spectrum(
-                    visit.wavelength.to(u.micron).value,
-                    s1,
-                    ese,
+                    visit.wavelength.to(u.micron),
+                    s1 * ppm,
+                    ese * ppm,
                     depth=ed,
                     name=visit.name + " Emission Spectrum",
                     visit=visit.visit_number,
@@ -310,9 +312,9 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
         visit.transmission_spectrum_draws = Spectra(
             [
                 Spectrum(
-                    visit.wavelength.to(u.micron).value,
-                    s1,
-                    s1 * np.nan,
+                    visit.wavelength.to(u.micron),
+                    s1 * ppm,
+                    s1 * np.nan * ppm,
                     depth=td,
                     name=visit.name + " Transmission Spectrum",
                     visit=visit.visit_number,
@@ -323,9 +325,9 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
             name=f"{visit.name} Transimission Spectrum Draws",
         )
         visit.transmission_spectrum = Spectrum(
-            visit.wavelength.to(u.micron).value,
-            1e6 * td * spline1.dot(w[:nknots]) / oot_flux,
-            samples.std(axis=1),
+            visit.wavelength.to(u.micron),
+            1e6 * td * spline1.dot(w[:nknots]) / oot_flux * ppm,
+            samples.std(axis=1) * ppm,
             depth=td,
             name=visit.name + " Transmission Spectrum",
             visit=visit.visit_number,
@@ -348,9 +350,9 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
         visit.emission_spectrum_draws = Spectra(
             [
                 Spectrum(
-                    visit.wavelength.to(u.micron).value,
-                    s1,
-                    s1 * np.nan,
+                    visit.wavelength.to(u.micron),
+                    s1 * ppm,
+                    s1 * np.nan * ppm,
                     depth=ed,
                     name=visit.name + " Emission Spectrum",
                     visit=visit.visit_number,
@@ -361,9 +363,9 @@ def fit_model(visit, spline: bool = False, nknots: int = 30, nsamps: int = 40):
             name=f"{visit.name} Emission Spectrum Draws",
         )
         visit.emission_spectrum = Spectrum(
-            visit.wavelength.to(u.micron).value,
-            1e6 * ed * spline1.dot(w[nknots : 2 * nknots]) / oot_flux,
-            1e6 * ed * spline1.dot(werr[nknots : 2 * nknots]) / oot_flux,
+            visit.wavelength.to(u.micron),
+            1e6 * ed * spline1.dot(w[nknots : 2 * nknots]) / oot_flux * ppm,
+            1e6 * ed * spline1.dot(werr[nknots : 2 * nknots]) / oot_flux * ppm,
             depth=ed,
             name=visit.name + " Emission Spectrum",
             visit=visit.visit_number,

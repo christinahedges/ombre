@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from glob import glob
 from datetime import datetime
 import warnings
+from astropy.wcs import WCS
 
 from astropy.io import fits, votable
 from astropy.time import Time
@@ -63,6 +64,7 @@ class Visit(object):
     dq: npt.NDArray[np.float64]
     time: npt.NDArray[np.float64]
     exptime: float
+    scan_length: float
     cadence_mask: Optional[npt.NDArray[bool]] = None
     name: Optional[str] = None
     forward: bool = True
@@ -74,6 +76,7 @@ class Visit(object):
     ra: Optional[float] = None
     dec: Optional[float] = None
     planet_letter: str = "b"
+    wcs: Optional = None
     #    t0: Optional[float] = None
     #    period: Optional[float] = None
 
@@ -92,7 +95,7 @@ class Visit(object):
         if self.ns == 1024:
             self.ns = 1014
         self.mask, self.spectral, self.spatial = simple_mask(
-            self.sci, filter=self.filter
+            self.sci, target_block=self._target_block, filter=self.filter
         )
         self.flat = np.ones((1, *self.sci.shape[1:]))
         for count in [0, 1]:
@@ -148,6 +151,20 @@ class Visit(object):
             ]
         )
         self.A = self._prepare_design_matrix()
+
+    @property
+    def _target_block(self):
+        def block(parity):
+            x0, y0 = self.wcs.all_world2pix([[self.ra, self.dec]], 0)[0]
+            x1, x2 = x0 + 10, x0 + 200
+            ys = y0, y0 - float((-1) ** (parity)) * self.scan_length * 9.5
+            y1 = np.min(ys) - 30
+            y2 = np.max(ys) + 30
+            Y, X = np.mgrid[: self.ns, : self.ns]
+            return (X > x1) & (X < x2) & (Y > y1) & (Y < y2)
+
+        parity = np.argmax([(self.sci * block(0)).sum(), (self.sci * block(1)).sum()])
+        return block(parity)
 
     def __repr__(self):
         return "{} Visit {}, Forward {} [Proposal ID: {}]".format(
@@ -234,14 +251,14 @@ class Visit(object):
         yshift = np.mean(Y[:, larger_mask] * w1, axis=1)
         self.yshift = yshift - np.median(yshift)
 
+        masked_data = np.ma.masked_array(
+            self.sci,
+            ~larger_mask[None, :, :] * np.ones(self.sci.shape, bool)
+            & (self.sci[0] == 0),
+        )
+
         bkg = sigma_clipped_stats(
-            np.ma.masked_array(
-                self.sci,
-                larger_mask[None, :, :] * np.ones(self.sci.shape, bool)
-                & (self.sci[0] != 0),
-            ),
-            axis=(1, 2),
-            sigma=3,
+            masked_data, axis=(1, 2), sigma=3, cenfunc=np.mean, maxiters=3, grow=1.5
         )[1]
         self.bkg = bkg - np.median(bkg)
 
@@ -284,10 +301,14 @@ class Visit(object):
             )
         if len(filenames) <= 12:
             raise ValueError("Not enough frames in visit.")
+        with fits.open(filenames[0], cache=False, memmap=False) as hdulist:
+            wcs = WCS(hdulist[1])
+
         hdrs = [fits.getheader(file) for idx, file in enumerate(filenames)]
         exptime = np.asarray([hdr["EXPTIME"] for hdr in hdrs])
         filenames = filenames[exptime == np.median(exptime)]
-        hdrs = [fits.getheader(file) for idx, file in enumerate(filenames)]
+        medexp = np.median(exptime)
+        hdrs = [hdr for exp, hdr in zip(exptime, hdrs) if exp == medexp]
 
         if len(np.unique(np.asarray([hdr["TARGNAME"] for hdr in hdrs]))) != 1:
             raise ValueError("More than one target in files.")
@@ -321,13 +342,15 @@ class Visit(object):
 
         postarg1 = np.asarray([hdr["POSTARG1"] for hdr in hdrs])
         postarg2 = np.asarray([hdr["POSTARG2"] for hdr in hdrs])
-        if forward:
-            mask &= postarg2 > 0
-        else:
-            mask &= postarg2 <= 0
-        hdrs = [hdr for m, hdr in zip(mask, hdrs) if m]
-        if not np.any(mask):
-            raise ValueError("No files exist with that direction")
+        scan_length = np.median(np.asarray([hdr["SCAN_LEN"] for hdr in hdrs]))
+        if scan_length > 0:
+            if forward:
+                mask &= postarg2 > 0
+            else:
+                mask &= postarg2 <= 0
+            hdrs = [hdr for m, hdr in zip(mask, hdrs) if m]
+            if not np.any(mask):
+                raise ValueError("No files exist with that direction")
 
         sci, err, dq = [], [], []
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
@@ -398,6 +421,8 @@ class Visit(object):
             ra=hdrs[0]["RA_TARG"],
             dec=hdrs[0]["DEC_TARG"],
             planet_letter=planet_letter,
+            wcs=wcs,
+            scan_length=scan_length,
             #            t0=t0,
             #            period=period,
         )
@@ -415,20 +440,20 @@ class Visit(object):
             np.atleast_3d(spec_mean) * np.ones(self.shape).transpose([0, 2, 1])
         ).transpose([0, 2, 1])
 
-    @property
-    def total_spectrum(self):
-        avg = np.atleast_3d(self.average_vsr)
-        oot = self.oot
-        d1 = self.data[oot] / avg
-        e1 = self.error[oot] / avg
-        spec_mean = np.average(d1, axis=0, weights=e1)
-        e = np.average((d1 - spec_mean) ** 2, axis=0, weights=e1) ** 0.5
-        e /= oot.sum() ** 0.5
-        spec_mean = spec_mean.sum(axis=0) * u.electron
-        e = (e ** 2).sum(axis=0) ** 0.5 * u.electron
-        spec_mean *= 1 / (self.exptime * u.second * u.Angstrom * self.sensitivity_raw)
-        e *= 1 / (self.exptime * u.second * u.Angstrom * self.sensitivity_raw)
-        return spec_mean, e
+    #
+    # @property
+    # def total_spectrum(self):
+    #     avg = np.atleast_3d(self.average_vsr)
+    #     d1 = self.data / avg
+    #     e1 = self.error / avg
+    #     spec_mean = np.average(d1, axis=0, weights=1 / e1)
+    #     e = np.average((d1 - spec_mean) ** 2, axis=0, weights=1 / e1) ** 0.5
+    #     e /= e.shape[0] ** 0.5
+    #     spec_mean = spec_mean.sum(axis=0) * u.electron
+    #     e = (e ** 2).sum(axis=0) ** 0.5 * u.electron
+    #     spec_mean *= 1 / (u.second * u.Angstrom * self.sensitivity_raw)
+    #     e *= 1 / (u.second * u.Angstrom * self.sensitivity_raw)
+    #     return spec_mean, e
 
     @property
     def _basic_vsr(self):
@@ -478,8 +503,14 @@ class Visit(object):
         )
 
     @property
-    def residuals(self):
+    def basic_residuals(self):
         return self.data - (self.average_lc[:, None, None] * self.model)
+
+    @property
+    def residuals(self):
+        if not hasattr(self, "full_model"):
+            raise ValueError("Please run `fit_model`")
+        return self.data - self.full_model
 
     @property
     def meta(self):
@@ -592,6 +623,8 @@ class Visit(object):
             """Find points where the telescope shifted during an observation."""
             dt = np.median(np.diff(time))
             k = np.where(np.diff(time) / dt > 3)[0] + 1
+            if len(k) == 0:
+                return None
             t, x, y = np.asarray(
                 [
                     (t[0], x.mean(), y.mean())
@@ -730,10 +763,10 @@ class Visit(object):
         """
         with plt.style.context("seaborn-white"):
             fig = plt.gcf()
-            fig.set_size_inches(11, 8.5)
+            fig.set_size_inches(11, 5.5)
             plt.suptitle(self.name)
             for ax, y in zip(
-                [plt.subplot2grid((3, 4), (0, 0)), plt.subplot2grid((3, 4), (0, 1))],
+                [plt.subplot2grid((2, 4), (0, 0)), plt.subplot2grid((2, 4), (0, 1))],
                 [self.sci[frame], self.data[frame]],
             ):
                 im = ax.imshow(
@@ -787,7 +820,7 @@ class Visit(object):
             #     #                aspect="auto",
             # )
 
-            ax = plt.subplot2grid((3, 4), (0, 2), colspan=2)
+            ax = plt.subplot2grid((2, 4), (0, 2), colspan=2)
             ax.errorbar(
                 self.time,
                 self.average_lc / np.median(self.average_lc),
@@ -862,7 +895,7 @@ class Visit(object):
             #     aspect="auto",
             # )
 
-            ax = plt.subplot2grid((3, 4), (1, 1))
+            ax = plt.subplot2grid((2, 4), (1, 1))
             im = ax.imshow(
                 self.average_vsr[frame]
                 * self.average_spectrum[frame]
@@ -877,15 +910,7 @@ class Visit(object):
                 #                aspect="auto",
             )
 
-            vlevel = np.max(
-                np.abs(
-                    np.percentile(
-                        self.residuals,
-                        [10, 90],
-                    )
-                )
-            )
-            ax = plt.subplot2grid((3, 4), (1, 0))
+            ax = plt.subplot2grid((2, 4), (1, 0))
             # im = ax.imshow(
             #     self.residuals[frame],
             #     cmap="coolwarm",
@@ -913,7 +938,7 @@ class Visit(object):
             ax.set(xlabel="Wavelength [A]", ylabel="Flux")
             ax.legend()
 
-            ax = plt.subplot2grid((3, 4), (1, 2), colspan=2)
+            ax = plt.subplot2grid((2, 4), (1, 2), colspan=2)
             im = ax.scatter(self.time, self.xshift, label="xshift", s=1)
             im = ax.scatter(self.time, self.yshift, label="yshift", s=1)
             im = ax.scatter(self.time, self.bkg, label="bkg", s=1)
@@ -924,24 +949,40 @@ class Visit(object):
                 ylabel="Value",
                 #                aspect="auto",
             )
-            l = np.argmax(np.abs(np.diff(self.average_spectrum[0, 0, :]))[20:-20]) + 19
+            return fig
 
-            for idx, ldx in enumerate(np.arange(l, l + 4)):
-                ax = plt.subplot2grid((3, 4), (2, idx))
+    def show_residual_panel(self):
+        fig, axs = plt.subplots(2, 4, sharex=True, sharey=True, figsize=(10, 5))
+        plt.suptitle(self.__repr__())
+        vlevel = np.max(
+            np.abs(
+                np.percentile(
+                    self.basic_residuals,
+                    [10, 90],
+                )
+            )
+        )
+        l = np.argmax(np.abs(np.diff(self.average_spectrum[0, 0, :]))[20:-20]) + 19
+        for idx, ldx in enumerate(np.arange(l, l + 4)):
+            for jdx, r in enumerate([self.basic_residuals, self.residuals]):
+                ax = axs[jdx, idx]
                 im = ax.imshow(
-                    self.residuals[:, :, ldx].T,
+                    r[:, :, ldx].T,
                     cmap="coolwarm",
                     vmin=-vlevel,
                     vmax=vlevel,
                 )
-                plt.colorbar(im, ax=ax)
-                ax.set(
-                    title=f"Residuals Channel [{ldx}]",
-                    xlabel="Time",
-                    ylabel="Spatial Pixel",
-                    #                    aspect="auto",
-                )
 
+                if jdx == 0:
+                    ax.set_title(f"Channel {ldx}")
+                else:
+                    ax.set_xlabel(f"Cadence Number")
+                if idx == 0:
+                    ax.set(ylabel="Spatial Pixel")
+
+                ax.set_aspect("auto")
+        cbar = plt.colorbar(im, ax=axs)
+        cbar.set_label("Residual [e$^-$/s]")
         return fig
 
     @property
@@ -983,7 +1024,9 @@ class Visit(object):
 
 
 def simple_mask(
-    sci: npt.NDArray[np.float64], filter: str = "G141"
+    sci: npt.NDArray[np.float64],
+    target_block: npt.NDArray[np.float64],
+    filter: str = "G141",
 ) -> (npt.NDArray[bool], npt.NDArray[np.float64], npt.NDArray[np.float64]):
     """Build a 4D boolean mask that is true where the spectrum is on the detector.
 
@@ -1001,53 +1044,78 @@ def simple_mask(
     spatial : np.ndarray of floats
         The average of the data in the spatial dimension.
     """
-
     mask = np.atleast_3d(sci.mean(axis=0) > np.nanpercentile(sci, 50)).transpose(
         [2, 0, 1]
     )
+    for count in [0, 1]:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            data = sci / mask
+            data[~np.isfinite(data)] = np.nan
+            spectral = np.nanmean(data, axis=(0, 1))
+            spatial = np.nanmean(data, axis=(0, 2))
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        data = sci / mask
-        data[~np.isfinite(data)] = np.nan
-        spectral = np.nanmean(data, axis=(0, 1))
-        spatial = np.nanmean(data, axis=(0, 2))
+        # These are hard coded to be generous.
+        spatial_cut = 0.4
+        if filter == "G102":
+            spectral_cut = 0.4
+        if filter == "G141":
+            spectral_cut = 0.3
 
-    # These are hard coded to be generous.
-    spatial_cut = 0.4
-    if filter == "G102":
-        spectral_cut = 0.4
-    if filter == "G141":
-        spectral_cut = 0.3
+        spectral = spectral > np.nanmax(spectral) * spectral_cut
+        # G102 edge is hard to find.
+        # if filter == "G102":
+        #     edge = (
+        #         np.where((np.gradient(spectral / np.nanmax(spectral)) < -0.07))[0][0] - 10
+        #     )
+        #     m = np.ones(len(spectral), bool)
+        #     m[edge:] = False
+        #     spectral &= m
 
-    spectral = spectral > np.nanmax(spectral) * spectral_cut
-    # G102 edge is hard to find.
-    # if filter == "G102":
-    #     edge = (
-    #         np.where((np.gradient(spectral / np.nanmax(spectral)) < -0.07))[0][0] - 10
-    #     )
-    #     m = np.ones(len(spectral), bool)
-    #     m[edge:] = False
-    #     spectral &= m
+        spatial = spatial > np.nanmax(spatial) * spatial_cut
 
-    spatial = spatial > np.nanmax(spatial) * spatial_cut
+        mask = (
+            np.atleast_3d(np.atleast_2d(spectral) * np.atleast_2d(spatial).T)
+        ).transpose([2, 0, 1])
 
-    mask = (
-        np.atleast_3d(np.atleast_2d(spectral) * np.atleast_2d(spatial).T)
-    ).transpose([2, 0, 1])
+        # Cut out the zero phase dispersion!
+        # Choose the widest block as the true dispersion...
+        secs = mask[0].any(axis=0).astype(int)
+        sec_l = np.hstack(
+            [0, np.where(np.gradient(secs) != 0)[0][::2] + 1, mask.shape[1]]
+        )
+        dsec_l = np.diff(sec_l)
+        msec_l = np.asarray([s.mean() for s in np.array_split(secs, sec_l[1:-1])])
+        l = sec_l[np.argmax(dsec_l * msec_l) : np.argmax(dsec_l * msec_l) + 2]
+        m = np.zeros(mask.shape[1:], bool)
+        m[:, l[0] : l[1]] = True
+        mask[0] &= m
 
-    # Cut out the zero phase dispersion!
-    # Choose the widest block as the true dispersion...
-    secs = mask[0].any(axis=0).astype(int)
-    sec_l = np.hstack([0, np.where(np.gradient(secs) != 0)[0][::2] + 1, mask.shape[1]])
-    dsec_l = np.diff(sec_l)
-    msec_l = np.asarray([s.mean() for s in np.array_split(secs, sec_l[1:-1])])
-    l = sec_l[np.argmax(dsec_l * msec_l) : np.argmax(dsec_l * msec_l) + 2]
-    m = np.zeros(mask.shape[1:], bool)
-    m[:, l[0] : l[1]] = True
-    mask[0] &= m
-    return (
-        mask,
-        np.atleast_3d(np.atleast_2d(spectral * m[0])).transpose([2, 0, 1]),
-        np.atleast_3d(np.atleast_2d(spatial.T)).transpose([2, 1, 0]),
+        secs = mask[0].any(axis=1).astype(int)
+        sec_l = np.hstack(
+            [0, np.where(np.gradient(secs) != 0)[0][::2] + 1, mask.shape[1]]
+        )
+        dsec_l = np.diff(sec_l)
+        msec_l = np.asarray([s.mean() for s in np.array_split(secs, sec_l[1:-1])])
+        if (msec_l == 1).sum() == 1:
+            break
+        else:
+            mask = np.atleast_3d(
+                sci.mean(axis=0) > np.nanpercentile(sci, 50)
+            ).transpose([2, 0, 1])
+            mask[0] &= target_block
+
+    spectral, spatial = (
+        np.atleast_3d(np.atleast_2d(spectral & mask[0].any(axis=0))).transpose(
+            [2, 0, 1]
+        ),
+        np.atleast_3d(np.atleast_2d((spatial & mask[0].any(axis=1)).T)).transpose(
+            [2, 1, 0]
+        ),
     )
+    if spatial.sum() < 4:
+        while spatial.sum() < 4:
+            spatial |= (np.gradient(spatial[0, :, 0].astype(float)) != 0)[None, :, None]
+        mask = spatial & spectral
+
+    return (mask, spectral, spatial)

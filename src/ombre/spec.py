@@ -54,6 +54,12 @@ class Spectrum(object):
             raise ValueError(
                 "`spec`, `spec_err`, and `wavelength` must all be the same length"
             )
+        if not hasattr(self.wavelength, "unit"):
+            self.wavelength *= u.micron
+        if not hasattr(self.spec, "unit"):
+            self.spec *= ppm
+        if not hasattr(self.spec_err, "unit"):
+            self.spec_err *= ppm
         if hasattr(visit, "__iter__"):
             if len(visit) == 1:
                 self.visit = visit[0]
@@ -79,8 +85,14 @@ class Spectrum(object):
 
     def bin(self, bins: Optional[npt.NDArray] = None):
         if bins is None:
-            bins = np.linspace(0.8, 1.7, 100)
-        y, ye = np.zeros(len(bins) - 1) * np.nan, np.zeros(len(bins) - 1) * np.nan
+            bins = np.linspace(0.8, 1.7, 100) * u.micron
+        if not hasattr(bins, "unit"):
+            bins *= u.micron
+        bins = bins.to(self.wavelength.unit)
+        y, ye = (
+            np.zeros(len(bins) - 1) * np.nan * self.spec.unit,
+            np.zeros(len(bins) - 1) * np.nan * self.spec_err.unit,
+        )
         for idx in range(len(bins) - 1):
             k = (
                 (self.wavelength > bins[idx])
@@ -89,16 +101,20 @@ class Spectrum(object):
             )
             if k.sum() == 0:
                 continue
-            if np.nansum(self.spec_err) == 0:
-                y[idx] = np.average(self.spec[k])
-                ye[idx] = np.average((self.spec[k] - y[idx]) ** 2) ** 0.5 / (
-                    k.sum() ** 0.5
-                )
+            if k.sum() > 4:
+                if np.nansum(self.spec_err) == 0:
+                    y[idx] = np.average(self.spec[k])
+                    ye[idx] = np.average((self.spec[k] - y[idx]) ** 2) ** 0.5 / (
+                        k.sum() ** 0.5
+                    )
+                else:
+                    y[idx] = np.average(self.spec[k], weights=1 / self.spec_err[k])
+                    ye[idx] = np.average(
+                        (self.spec[k] - y[idx]) ** 2, weights=1 / self.spec_err[k]
+                    ) ** 0.5 / (k.sum() ** 0.5)
             else:
-                y[idx] = np.average(self.spec[k], weights=1 / self.spec_err[k])
-                ye[idx] = np.average(
-                    (self.spec[k] - y[idx]) ** 2, weights=1 / self.spec_err[k]
-                ) ** 0.5 / (k.sum() ** 0.5)
+                y[idx] = np.mean(self.spec[k])
+                ye[idx] = np.sum(self.spec_err[k] ** 2) ** 0.5 / (k.sum())
         bins = bins[:-1] + np.median(np.diff(bins)) / 2
         return Spectrum(
             bins,
@@ -115,9 +131,9 @@ class Spectrum(object):
         """Spectrum as an astropy.table.Table object"""
         return Table(
             [
-                (self.wavelength) * u.micron,
-                self.spec * ppm,
-                self.spec_err * ppm,
+                (self.wavelength),
+                self.spec,
+                self.spec_err,
             ],
             names=["wavelength", "spectrum", "spectrum_err"],
         )
@@ -149,15 +165,15 @@ class Spectrum(object):
                 _, ax = plt.subplots()
             if np.nansum(self.spec_err) != 0:
                 ax.errorbar(
-                    self.wavelength,
-                    self.spec,
-                    self.spec_err,
+                    self.wavelength.value,
+                    self.spec.value,
+                    self.spec_err.value,
                     **kwargs,
                 )
             else:
                 ax.plot(
-                    self.wavelength,
-                    self.spec,
+                    self.wavelength.value,
+                    self.spec.value,
                     **kwargs,
                 )
             plt.title(f"{self.name}, Visit: {self.visit}")
@@ -172,7 +188,7 @@ class Spectrum(object):
         keys = keys[np.where(keys == "DEPTH")[0][0] + 1 :]
         meta = {key.lower(): hdu[ext].header[key] for key in keys}
         self = Spectrum(
-            hdu[ext].data["wavelength"],
+            hdu[ext].data["wavelength"] * u.Unit(hdu[ext].header["TUNIT1"]),
             hdu[ext].data["spectrum"],
             hdu[ext].data["spectrum_err"],
             visit=hdu[ext].header["VISIT"],
@@ -195,6 +211,8 @@ class Spectrum(object):
 
         if self.meta is not None:
             for key, item in self.meta.items():
+                if ~np.isfinite(item):
+                    continue
                 hdr[key] = item
         return hdu
 
@@ -296,7 +314,7 @@ class Spectra(object):
             name=self[0].name,
             depth=self[0].depth,
             meta=self[0].meta,
-            visit=self[0].visit,
+            visit=0,
         )
 
     @property
@@ -337,7 +355,7 @@ class Spectra(object):
                 meta = {key.lower(): hdu[ext].header[key] for key in keys}
                 specs.append(
                     Spectrum(
-                        hdu[ext].data["wavelength"],
+                        hdu[ext].data["wavelength"] * u.Unit(hdu[ext].header["TUNIT1"]),
                         hdu[ext].data["spectrum"],
                         hdu[ext].data["spectrum_err"],
                         visit=hdu[ext].header["VISIT"],

@@ -136,17 +136,18 @@ class Observation(
         for direction in [True, False]:
             for idx, mask in enumerate(masks):
                 try:
-                    visits.append(
-                        Visit.from_files(
-                            fnames[mask],
-                            forward=direction,
-                            visit_number=idx + 1,
-                            force=force,
-                            pixel_mask=pixel_mask,
-                        )
+                    visit = Visit.from_files(
+                        fnames[mask],
+                        forward=direction,
+                        visit_number=idx + 1,
+                        force=force,
+                        pixel_mask=pixel_mask,
                     )
-                except ValueError:
+                    visits.append(visit)
+                except:
                     continue
+        if (not force) & (len(visits) == 0):
+            raise ValueError("Can not extract visits, try `force`.")
         return Observation(
             visits, name=visits[0].name, planet_letter=planet_letter, **kwargs
         )
@@ -416,9 +417,10 @@ class Observation(
                     continue
                 # spec = visit.average_spectrum[0, 0, :] / visit.sensitivity
                 # c = np.mean(spec)
-                spec = visit.total_spectrum
+                spec = visit.average_spectrum[0, 0, :] / visit.sensitivity
+                c = np.mean(spec)
                 w.append(visit.wavelength)
-                y.append(spec)
+                y.append(spec / c)
                 ye.append(np.zeros(visit.nwav))
             if len(w) > 0:
                 w, y, ye = np.hstack(w), np.hstack(y), np.hstack(ye)

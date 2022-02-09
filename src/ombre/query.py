@@ -9,8 +9,28 @@ import logging
 from astropy.constants import G, k_B, m_p
 from astropy.utils.data import download_file
 import pandas as pd
+from functools import wraps
+import sys
 
 log = logging.getLogger("ombre")
+
+
+def suppress_stdout(f, *args):
+    """A simple decorator to suppress function print outputs."""
+
+    @wraps(f)
+    def wrapper(*args):
+        # redirect output to `null`
+        with open(os.devnull, "w") as devnull:
+            old_out = sys.stdout
+            sys.stdout = devnull
+            try:
+                return f(*args)
+            # restore to default
+            finally:
+                sys.stdout = old_out
+
+    return wrapper
 
 
 def get_nexsci(input, letter="b", **kwargs):
@@ -53,6 +73,7 @@ def get_nexsci(input, letter="b", **kwargs):
     return period, t0, duration, radius, mass, incl, st_rad, st_mass, st_teff, dist
 
 
+# @suppress_stdout
 def download_target(targetname, radius="10 arcsec", download_dir=None):
     """Downloads the WFC3 observations for a target"""
     if download_dir is None:
