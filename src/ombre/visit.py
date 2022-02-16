@@ -15,7 +15,7 @@ from astropy.stats import sigma_clipped_stats, sigma_clip
 import astropy.units as u
 from astropy.convolution import convolve, Box2DKernel
 from . import PACKAGEDIR
-from .modeling import fit_transit
+from .modeling import fit_multi_transit
 from .calibrate import wavelength_calibrate
 from .matrix import fit_model
 
@@ -67,6 +67,7 @@ class Visit(object):
     scan_length: float
     cadence_mask: Optional[npt.NDArray[bool]] = None
     name: Optional[str] = None
+    planets: Optional[str] = None
     forward: bool = True
     visit_number: Optional[int] = 1
     propid: Optional[int] = 0
@@ -75,8 +76,8 @@ class Visit(object):
     filenames: Optional[List[str]] = None
     ra: Optional[float] = None
     dec: Optional[float] = None
-    planet_letter: str = "b"
     wcs: Optional = None
+
     #    t0: Optional[float] = None
     #    period: Optional[float] = None
 
@@ -116,6 +117,14 @@ class Visit(object):
             if count == 0:
                 self.flat = self.get_flatfield()
 
+        # Large gradient residuals
+        bad_pixel_mask = self.error / self.data > 0.1
+        grad = (np.asarray(np.gradient(self.data)) ** 2).sum(axis=0)
+        grad = np.ma.masked_array(grad, bad_pixel_mask)
+        for tdx in range(self.nt):
+            bad_pixel_mask[tdx] |= sigma_clip(grad[tdx], axis=(1), sigma=6).mask
+        self.error[bad_pixel_mask] = 1e10
+
         T = (
             np.atleast_3d(self.time) * np.ones(self.shape).transpose([1, 0, 2])
         ).transpose([1, 0, 2])
@@ -135,10 +144,16 @@ class Visit(object):
             cadence_mask = np.ones(self.nt, bool)
 
         # self.model_lc = self.sys.flux(t=self.time).eval()
+        # 6 sigmal residuals
         self.model = (
             self.average_spectrum * self.average_vsr  # * self.average_lc[:, None, None]
         )
-
+        bad_pixel_mask = sigma_clip(
+            np.ma.masked_array(self.basic_residuals, self.error / self.data > 0.1),
+            sigma=6,
+            cenfunc=lambda x, axis: 0,
+        ).mask
+        self.error[bad_pixel_mask] = 1e10
         self._build_regressors()
         self._subtime = dts = np.vstack(
             [
@@ -173,7 +188,7 @@ class Visit(object):
 
     def calibrate(self):
         if not hasattr(self, "st_teff"):
-            get_nexsci(self, letter=self.planet_letter)
+            get_nexsci(self, self.planets)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             (
@@ -269,7 +284,6 @@ class Visit(object):
         forward: bool = True,
         t0: Optional[float] = None,
         period: Optional[float] = None,
-        planet_letter: str = "b",
         force=False,
         pixel_mask=None,
     ):
@@ -420,7 +434,6 @@ class Visit(object):
             visit_number=visit_number,
             ra=hdrs[0]["RA_TARG"],
             dec=hdrs[0]["DEC_TARG"],
-            planet_letter=planet_letter,
             wcs=wcs,
             scan_length=scan_length,
             #            t0=t0,
@@ -512,12 +525,11 @@ class Visit(object):
             raise ValueError("Please run `fit_model`")
         return self.data - self.full_model
 
-    @property
-    def meta(self):
+    def meta(self, pdx):
         meta = {
             attr: [
-                getattr(self, attr)
-                if not hasattr(getattr(self, attr), "__iter__")
+                getattr(self, attr)[pdx]
+                if hasattr(getattr(self, attr), "__iter__")
                 else float(getattr(self, attr))
             ][0]
             for attr in [
@@ -589,7 +601,7 @@ class Visit(object):
     def _prepare_design_matrix(self):
         """Make a design matrix for transit fitting"""
         if not hasattr(self, "st_teff"):
-            get_nexsci(self)
+            get_nexsci(self, self.planets)
         grad = np.gradient(self.average_lc / self.average_lc.mean())[:8]
         hook_model = -np.exp(
             np.polyval(
@@ -655,7 +667,7 @@ class Visit(object):
     def fit_transit(self, **kwargs):
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self._pymc3_model, self.map_soln = fit_transit(
+            self._pymc3_model, self.map_soln = fit_multi_transit(
                 x=self.time,
                 y=self.average_lc / np.median(self.average_lc),
                 yerr=self.average_lc_err / np.median(self.average_lc),
@@ -672,16 +684,18 @@ class Visit(object):
                 **kwargs,
             )
         self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
-            (self.nt, self.nsp)
+            (self.nt, self.nsp, self.nplanets)
         )
         self.transit_subtime = self.map_soln["transit_subtime"].reshape(
-            (self.nt, self.nsp)
+            (self.nt, self.nsp, self.nplanets)
         )
         self.eclipse_subtime = self.map_soln["eclipse_subtime"].reshape(
-            (self.nt, self.nsp)
+            (self.nt, self.nsp, self.nplanets)
         )
 
-    def plot(self, ax: Optional[plt.Axes] = None, **kwargs) -> plt.Axes:
+    def plot(
+        self, ax: Optional[plt.Axes] = None, xlim=None, ylim=None, **kwargs
+    ) -> plt.Axes:
         """Create a plot of the `Observation`.
 
         Parameters
@@ -701,13 +715,6 @@ class Visit(object):
             if ax is None:
                 _, ax = plt.subplots()
             norm = np.median(self.average_lc[self.oot]) * np.ones(self.nt)
-            ax.scatter(
-                self.time,
-                self.average_lc / norm,
-                s=1,
-                c="r",
-                label="Raw",
-            )
             ax.set(xlabel="Time [JD]", ylabel="$e^-s^{-1}$")
             if hasattr(self, "transit"):
                 y = self.average_lc / self.noise_model
@@ -719,35 +726,49 @@ class Visit(object):
                     label="Corrected",
                 )
                 if self.transit.sum() != 0:
-                    plt.scatter(self.time, self.transit + 1, s=2, label="Transit")
+                    plt.scatter(
+                        self.time, self.transit.sum(axis=-1) + 1, s=2, label="Transit"
+                    )
                 if self.eclipse.sum() != 0:
-                    plt.scatter(self.time, self.eclipse + 1, s=2, label="Eclipse")
+                    plt.scatter(
+                        self.time, self.eclipse.sum(axis=-1) + 1, s=2, label="Eclipse"
+                    )
+            else:
+                ax.scatter(
+                    self.time,
+                    self.average_lc / norm,
+                    s=1,
+                    c="r",
+                    label="Raw",
+                )
             ax.legend()
+            ax.set(xlim=xlim, ylim=ylim)
         return ax
 
     @property
     def oot(self):
         if not hasattr(self, "transit"):
             return np.ones(self.nt, bool)
-        return (self.eclipse + self.transit) == 0
+        return ((self.eclipse + self.transit) == 0).all(axis=-1)
 
-    def fit_model(self, spline=False, nknots=30, nsamps=40):
-        """
-        Fits the eclipse/transit models for a given visit.
-
-        Parameters
-        ----------
-
-        spline: bool
-            Whether to use a spline model for the transit depth
-            If True, will use splines. This will make the spectrum
-            "smooth"
-        nknots: int
-            Number of knots for the spline
-        nsamps: int
-            Number of samples to draw for each spectrum
-        """
-        fit_model(self, spline=spline, nknots=nknots, nsamps=nsamps)
+    #
+    # def fit_model(self, spline=False, nsamps=40, suffix=""):
+    #     """
+    #     Fits the eclipse/transit models for a given visit.
+    #
+    #     Parameters
+    #     ----------
+    #
+    #     spline: bool
+    #         Whether to use a spline model for the transit depth
+    #         If True, will use splines. This will make the spectrum
+    #         "smooth"
+    #     nknots: int
+    #         Number of knots for the spline
+    #     nsamps: int
+    #         Number of samples to draw for each spectrum
+    #     """
+    #     fit_model(self, spline=spline, nsamps=nsamps, suffix=suffix)
 
     def diagnose(self, frame: int = 0) -> plt.figure:
         """Make a diagnostic plot for the visit
@@ -852,14 +873,14 @@ class Visit(object):
                 if np.nansum(self.transit) != 0:
                     ax.plot(
                         self.time,
-                        self.transit + 1,
+                        self.transit.sum(axis=-1) + 1,
                         c="blue",
                         label="Transit model",
                     )
                 if np.nansum(self.eclipse) != 0:
                     ax.plot(
                         self.time,
-                        self.eclipse + 1,
+                        self.eclipse.sum(axis=-1) + 1,
                         c="red",
                         label="Eclipse model",
                     )
@@ -896,7 +917,7 @@ class Visit(object):
             # )
 
             ax = plt.subplot2grid((2, 4), (1, 1))
-            im = ax.imshow(
+            im = ax.pcolormesh(
                 self.average_vsr[frame]
                 * self.average_spectrum[frame]
                 * self.average_lc[frame],
@@ -951,7 +972,7 @@ class Visit(object):
             )
             return fig
 
-    def show_residual_panel(self):
+    def plot_residual_panel(self):
         fig, axs = plt.subplots(2, 4, sharex=True, sharey=True, figsize=(10, 5))
         plt.suptitle(self.__repr__())
         vlevel = np.max(

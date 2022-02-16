@@ -33,44 +33,51 @@ def suppress_stdout(f, *args):
     return wrapper
 
 
-def get_nexsci(input, letter="b", **kwargs):
+def get_nexsci(input, planets=None, **kwargs):
     if isinstance(input, (tuple, list, np.ndarray)):
         ra, dec = np.copy(input)
     else:
         ra, dec = np.copy(input.ra), np.copy(input.dec)
     url = (
         "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-        "select+ra,dec,pl_letter,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_bmassj,pl_orbincl,st_rad,st_mass,st_teff,sy_dist+from+pscomppars+where+"
+        "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_bmassj,pl_orbincl,st_rad,st_mass,st_teff,sy_dist,pl_letter+from+pscomppars+where+"
         f"ra+>+{ra - 0.0083333}+and+ra+<+{ra + 0.0083333}+and+dec+>{dec - 0.0083333}+and+dec+<{dec + 0.0083333}"
     )
     try:
         df = votable.parse(url).get_first_table().to_table().to_pandas()
-        df = df[df.pl_letter == letter].reset_index(drop=True)
-        (
-            ra,
-            dec,
-            pl_letter,
-            period,
-            t0,
-            duration,
-            radius,
-            mass,
-            incl,
-            st_rad,
-            st_mass,
-            st_teff,
-            dist,
-        ) = df.iloc[0]
+        df = df.sort_values("pl_orbper")
+        if planets is not None:
+            df = df[
+                np.any([np.in1d(df.pl_letter, letter) for letter in planets], axis=0)
+            ]
+        # df = df[df.pl_letter == letter].reset_index(drop=True)
+        (ra, dec, period, t0, duration, radius, mass, incl,) = (
+            np.asarray(df).T[:8].astype(float)
+        )
+        (st_rad, st_mass, st_teff, dist) = np.asarray(df).T[8:-1, 0].astype(float)
+        pl_letter = np.asarray(df.pl_letter)
     except URLError:
         raise URLError(
             "Can not access the internet to query NExSci for exoplanet parameters."
         )
     except IndexError:
-        return 0, 0, 0, 0, 0, 90, 0, 0, 6000, 0
+        return 0, 0, 0, 0, 0, 90, "b", 0, 0, 6000, 0
 
     radius *= u.earthRad.to(u.solRad)
     mass *= u.jupiterMass.to(u.solMass)
-    return period, t0, duration, radius, mass, incl, st_rad, st_mass, st_teff, dist
+    return (
+        period,
+        t0,
+        duration,
+        radius,
+        mass,
+        incl,
+        pl_letter,
+        st_rad,
+        st_mass,
+        st_teff,
+        dist,
+    )
 
 
 # @suppress_stdout
@@ -145,8 +152,8 @@ def get_nexsci_df(cache=True):
         "fpl_eccen,fpl_eccenerr1,fpl_eccenerr2,fst_spt"
     )
 
-    path1 = download_file(url1, cache=cache, show_progress=False, pkgname="starry")
-    path2 = download_file(url2, cache=cache, show_progress=False, pkgname="starry")
+    path1 = download_file(url1, cache=cache, show_progress=False, pkgname="ombre")
+    path2 = download_file(url2, cache=cache, show_progress=False, pkgname="ombre")
 
     planets = pd.read_csv(
         path1,
