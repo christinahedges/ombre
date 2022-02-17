@@ -1,0 +1,87 @@
+site_name: ombre
+nav:
+    - Home: README.md
+    - 'API Documentation':
+      - observation: observation.md
+      - spec: spectra.md
+    - 'Catalog':
+      - notebooks/55-Cancri.ipynb
+      - notebooks/GJ1214.ipynb
+      - notebooks/GJ3470.ipynb
+      - notebooks/GJ436.ipynb
+      - notebooks/GJ9827-b.ipynb
+      - notebooks/GJ9827.ipynb
+      - notebooks/HAT-P-1.ipynb
+      - notebooks/HAT-P-11.ipynb
+      - notebooks/HAT-P-12.ipynb
+      - notebooks/HAT-P-17.ipynb
+      - notebooks/HAT-P-18.ipynb
+      - notebooks/HAT-P-26.ipynb
+      - notebooks/HAT-P-32.ipynb
+      - notebooks/HAT-P-38.ipynb
+      - notebooks/HAT-P-41.ipynb
+      - notebooks/HD-149026.ipynb
+      - notebooks/HD106315.ipynb
+      - notebooks/HD189733.ipynb
+      - notebooks/HD209458.ipynb
+      - notebooks/HD3167.ipynb
+      - notebooks/HD93396.ipynb
+      - notebooks/K2-18-b.ipynb
+      - notebooks/K2-18.ipynb
+      - notebooks/LHS-1140.ipynb
+      - notebooks/LHS-281.ipynb
+      - notebooks/WASP-107.ipynb
+      - notebooks/WASP-12.ipynb
+      - notebooks/WASP-17.ipynb
+      - notebooks/WASP-29.ipynb
+      - notebooks/WASP-31.ipynb
+      - notebooks/WASP-33.ipynb
+      - notebooks/WASP-39.ipynb
+      - notebooks/WASP-43.ipynb
+      - notebooks/WASP-52.ipynb
+      - notebooks/WASP-6.ipynb
+      - notebooks/WASP-63.ipynb
+      - notebooks/WASP-67.ipynb
+      - notebooks/WASP-69.ipynb
+      - notebooks/WASP-76.ipynb
+      - notebooks/WASP-79.ipynb
+      - notebooks/WASP-80.ipynb
+      - notebooks/WASP-90.ipynb
+      - notebooks/WASP-96.ipynb
+      - notebooks/XO-1.ipynb
+    - To Do: todo.md
+
+theme:
+  name: "material"
+  icon:
+    logo: material/box-shadow
+  palette:
+    scheme: default
+    primary: black
+    accent: deep orange
+  features:
+      - navigation.tabs
+      - navigation.tabs.sticky
+repo_url: https://github.com/christinahedges/ombre
+plugins:
+  - search
+  - encryptcontent:
+      title_prefix: '[LOCKED]'
+      summary: 'This content is temporarily locked. If you have the password for this object, you can enter it below.'
+      placeholder: 'Password'
+      decryption_failure_message: 'Invalid password.'
+      encryption_info_message: 'If you feel you should have access to this page please either contact me directly or leave an issue on the ombre GitHub page.'
+      password_button: True
+  - mkdocs-jupyter:
+      execute: False
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          selection:
+            docstring_style: "numpy"
+          rendering:
+            show_source: false
+      custom_templates: templates
+      watch:
+        - src/ombre
