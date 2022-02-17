@@ -155,14 +155,20 @@ class Visit(object):
         ).mask
         self.error[bad_pixel_mask] = 1e10
         self._build_regressors()
-        self._subtime = dts = np.vstack(
+        # self._subtime = np.vstack(
+        #     [
+        #         np.linspace(
+        #             self.time[idx] - (self.exptime * u.second.to(u.day)) / 2,
+        #             self.time[idx] + (self.exptime * u.second.to(u.day)) / 2,
+        #             self.nsp,
+        #         )
+        #         for idx in range(self.nt)
+        #     ]
+        # )
+        self._subtime = np.hstack(
             [
-                np.linspace(
-                    self.time[idx] - (self.exptime * u.second.to(u.day)) / 2,
-                    self.time[idx] + (self.exptime * u.second.to(u.day)) / 2,
-                    self.nsp,
-                )
-                for idx in range(self.nt)
+                self.time - (self.exptime * u.second.to(u.day)) / 2,
+                self.time + (self.exptime * u.second.to(u.day)) / 2,
             ]
         )
         self.A = self._prepare_design_matrix()
@@ -315,7 +321,9 @@ class Visit(object):
             )
         if len(filenames) <= 12:
             raise ValueError("Not enough frames in visit.")
-        with fits.open(filenames[0], cache=False, memmap=False) as hdulist:
+        with fits.open(
+            filenames[0], cache=False, memmap=False, lazy_load_hdus=True
+        ) as hdulist:
             wcs = WCS(hdulist[1])
 
         hdrs = [fits.getheader(file) for idx, file in enumerate(filenames)]
@@ -364,7 +372,8 @@ class Visit(object):
                 mask &= postarg2 <= 0
             hdrs = [hdr for m, hdr in zip(mask, hdrs) if m]
             if not np.any(mask):
-                raise ValueError("No files exist with that direction")
+                return None
+        #                raise ValueError("No files exist with that direction")
 
         sci, err, dq = [], [], []
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
@@ -600,8 +609,6 @@ class Visit(object):
 
     def _prepare_design_matrix(self):
         """Make a design matrix for transit fitting"""
-        if not hasattr(self, "st_teff"):
-            get_nexsci(self, self.planets)
         grad = np.gradient(self.average_lc / self.average_lc.mean())[:8]
         hook_model = -np.exp(
             np.polyval(
@@ -664,34 +671,35 @@ class Visit(object):
             return A2
         return A
 
-    def fit_transit(self, **kwargs):
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            self._pymc3_model, self.map_soln = fit_multi_transit(
-                x=self.time,
-                y=self.average_lc / np.median(self.average_lc),
-                yerr=self.average_lc_err / np.median(self.average_lc),
-                r_val=self.radius,
-                t0_val=self.t0,
-                period_val=self.period,
-                inc_val=np.deg2rad(self.incl),
-                r_star=self.st_rad,
-                m_star=self.st_mass,
-                exptime=np.median(np.diff(self.time)),
-                A=self.A,
-                offsets=self.A[:, -1][:, None],
-                subtime=self._subtime,
-                **kwargs,
-            )
-        self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
-            (self.nt, self.nsp, self.nplanets)
-        )
-        self.transit_subtime = self.map_soln["transit_subtime"].reshape(
-            (self.nt, self.nsp, self.nplanets)
-        )
-        self.eclipse_subtime = self.map_soln["eclipse_subtime"].reshape(
-            (self.nt, self.nsp, self.nplanets)
-        )
+    #
+    # def fit_transit(self, **kwargs):
+    #     with warnings.catch_warnings():
+    #         warnings.simplefilter("ignore")
+    #         self._pymc3_model, self.map_soln = fit_multi_transit(
+    #             x=self.time,
+    #             y=self.average_lc / np.median(self.average_lc),
+    #             yerr=self.average_lc_err / np.median(self.average_lc),
+    #             r_val=self.radius,
+    #             t0_val=self.t0,
+    #             period_val=self.period,
+    #             inc_val=np.deg2rad(self.incl),
+    #             r_star=self.st_rad,
+    #             m_star=self.st_mass,
+    #             exptime=np.median(np.diff(self.time)),
+    #             A=self.A,
+    #             offsets=self.A[:, -1][:, None],
+    #             subtime=self._subtime,
+    #             **kwargs,
+    #         )
+    #     self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
+    #         (self.nt, self.nsp, self.nplanets)
+    #     )
+    #     self.transit_subtime = self.map_soln["transit_subtime"].reshape(
+    #         (self.nt, self.nsp, self.nplanets)
+    #     )
+    #     self.eclipse_subtime = self.map_soln["eclipse_subtime"].reshape(
+    #         (self.nt, self.nsp, self.nplanets)
+    #     )
 
     def plot(
         self, ax: Optional[plt.Axes] = None, xlim=None, ylim=None, **kwargs
@@ -716,7 +724,7 @@ class Visit(object):
                 _, ax = plt.subplots()
             norm = np.median(self.average_lc[self.oot]) * np.ones(self.nt)
             ax.set(xlabel="Time [JD]", ylabel="$e^-s^{-1}$")
-            if hasattr(self, "transit"):
+            if hasattr(self, "transits"):
                 y = self.average_lc / self.noise_model
                 plt.scatter(
                     self.time,
@@ -725,13 +733,21 @@ class Visit(object):
                     s=1,
                     label="Corrected",
                 )
-                if self.transit.sum() != 0:
+                if self.transits.sum() != 0:
                     plt.scatter(
-                        self.time, self.transit.sum(axis=-1) + 1, s=2, label="Transit"
+                        self.time,
+                        self.transits.sum(axis=-1) + 1,
+                        s=2,
+                        label="Transit",
+                        c="C0",
                     )
-                if self.eclipse.sum() != 0:
+                if self.eclipses.sum() != 0:
                     plt.scatter(
-                        self.time, self.eclipse.sum(axis=-1) + 1, s=2, label="Eclipse"
+                        self.time,
+                        self.eclipses.sum(axis=-1) + 1,
+                        s=2,
+                        label="Eclipse",
+                        c="C1",
                     )
             else:
                 ax.scatter(
@@ -747,9 +763,9 @@ class Visit(object):
 
     @property
     def oot(self):
-        if not hasattr(self, "transit"):
+        if not hasattr(self, "transits"):
             return np.ones(self.nt, bool)
-        return ((self.eclipse + self.transit) == 0).all(axis=-1)
+        return ((self.eclipses + self.transits) == 0).all(axis=-1)
 
     #
     # def fit_model(self, spline=False, nsamps=40, suffix=""):
@@ -851,7 +867,7 @@ class Visit(object):
                 marker=".",
                 ls="",
             )
-            if hasattr(self, "transit"):
+            if hasattr(self, "transits"):
                 # ax.scatter(
                 #     self.time,
                 #     self.map_soln["full_model"],
@@ -870,17 +886,17 @@ class Visit(object):
                     c="purple",
                     label="Noise Model",
                 )
-                if np.nansum(self.transit) != 0:
+                if np.nansum(self.transits) != 0:
                     ax.plot(
                         self.time,
-                        self.transit.sum(axis=-1) + 1,
+                        self.transits.sum(axis=-1) + 1,
                         c="blue",
                         label="Transit model",
                     )
-                if np.nansum(self.eclipse) != 0:
+                if np.nansum(self.eclipses) != 0:
                     ax.plot(
                         self.time,
-                        self.eclipse.sum(axis=-1) + 1,
+                        self.eclipses.sum(axis=-1) + 1,
                         c="red",
                         label="Eclipse model",
                     )

@@ -47,10 +47,10 @@ def vstack(vecs, n, wavelength_dependence=None):
 def vstack_independent(mat, n):
     """Custom vertical stack script to stack lightkurve design matrices"""
 
-    mat_s = sparse.lil_matrix(mat)
+    mat_s = sparse.csc_matrix(mat)
     npoints = mat.shape[0] * n
     ncomps = mat.shape[1] * n
-    X = sparse.lil_matrix((npoints, ncomps))
+    X = sparse.csc_matrix((npoints, ncomps))
     idx = 0
     jdx = 0
     for ndx in range(n):
@@ -117,11 +117,11 @@ def build_noise_matrix(visit):
     return Anames_all, As
 
 
-def build_transit_matrix(visit, spline=False):
+def build_transit_matrix(visit, spline=False, ld_npoly=1):
 
-    no_ld_t = visit.no_limb_transit_subtime
-    ld = visit.transit_subtime - no_ld_t
-    eclipse = visit.eclipse_subtime
+    no_ld_t = visit.no_limb_transits_subtime
+    ld = visit.transits_subtime - no_ld_t
+    eclipse = visit.eclipses_subtime
     if not spline:
         transit1 = vstack_independent(
             no_ld_t[np.ones(no_ld_t.shape[:2], bool), :], visit.nwav
@@ -140,7 +140,7 @@ def build_transit_matrix(visit, spline=False):
     else:
         spline1 = lk.designmatrix.create_sparse_spline_matrix(
             visit.wavelength.value,
-            knots=np.arange(0.6, 1.8, 0.0075) * 1e4,
+            knots=np.arange(0.6, 1.8, 0.01) * 1e4,
             degree=2,
         ).X
         spline = sparse.lil_matrix(
@@ -154,13 +154,13 @@ def build_transit_matrix(visit, spline=False):
         transit1, eclipse1 = [], []
         for pdx in range(visit.nplanets):
             t = sparse.csr_matrix(
-                (visit.transit_subtime[:, :, pdx][:, :, None] * np.ones(visit.shape))
+                (visit.transits_subtime[:, :, pdx][:, :, None] * np.ones(visit.shape))
                 .transpose([2, 0, 1])
                 .ravel()
             ).T
             transit1.append(spline.multiply(t))
             e = sparse.csr_matrix(
-                (visit.eclipse_subtime[:, :, pdx][:, :, None] * np.ones(visit.shape))
+                (visit.eclipses_subtime[:, :, pdx][:, :, None] * np.ones(visit.shape))
                 .transpose([2, 0, 1])
                 .ravel()
             ).T
@@ -168,13 +168,22 @@ def build_transit_matrix(visit, spline=False):
         transit1 = sparse.hstack(transit1)
         eclipse1 = sparse.hstack(eclipse1)
 
-    fixed0 = vstack(ld[np.ones(ld.shape[:2], bool), :].T, visit.nwav)
-    fixed1 = vstack(
-        ld[np.ones(ld.shape[:2], bool), :].T,
-        visit.nwav,
-        wavelength_dependence=np.linspace(-0.5, 0.5, visit.nwav),
-    )
-    As = sparse.hstack([transit1, eclipse1, fixed0, fixed1], format="csr")
+    A_ld = [
+        vstack(
+            ld[np.ones(ld.shape[:2], bool), :].T,
+            visit.nwav,
+            wavelength_dependence=np.linspace(-0.5, 0.5, visit.nwav) ** (idx + 1),
+        )
+        for idx in range(ld_npoly)
+    ]
+    #
+    # fixed0 = vstack(ld[np.ones(ld.shape[:2], bool), :].T, visit.nwav)
+    # fixed1 = vstack(
+    #     ld[np.ones(ld.shape[:2], bool), :].T,
+    #     visit.nwav,
+    #     wavelength_dependence=np.linspace(-0.5, 0.5, visit.nwav),
+    # )
+    As = sparse.hstack([transit1, eclipse1, *A_ld], format="csr")
     Anames = np.hstack(
         [
             [f"$\\delta f_{{tr, {letter}}}$" for letter in visit.letter],
@@ -193,7 +202,7 @@ def build_transit_matrix(visit, spline=False):
     return Anames, As
 
 
-def fit_model(visit, spline: bool = False, nsamps: int = 40, suffix=""):
+def fit_model(visit, spline: bool = False, nsamps: int = 50, suffix="", ld_npoly=1):
     """
     Fits the eclipse/transit models for a given visit.
 
@@ -212,7 +221,9 @@ def fit_model(visit, spline: bool = False, nsamps: int = 40, suffix=""):
 
     if not hasattr(visit, "As_noise"):
         visit.Anames_noise, visit.As_noise = build_noise_matrix(visit)
-    Anames_transit, As_transit = build_transit_matrix(visit, spline=spline)
+    Anames_transit, As_transit = build_transit_matrix(
+        visit, spline=spline, ld_npoly=ld_npoly
+    )
     Anames, As = (np.hstack([Anames_transit, visit.Anames_noise])), sparse.hstack(
         [As_transit, visit.As_noise]
     )
@@ -226,12 +237,12 @@ def fit_model(visit, spline: bool = False, nsamps: int = 40, suffix=""):
     prior_sigma = np.ones(As.shape[1]) * 1000000
 
     oot = (
-        visit.transit_subtime.sum(axis=-1).sum(axis=1)
-        + visit.eclipse_subtime.sum(axis=-1).sum(axis=1)
+        visit.transits_subtime.sum(axis=-1).sum(axis=1)
+        + visit.eclipses_subtime.sum(axis=-1).sum(axis=1)
     ) == 0
     k = np.ones(visit.shape, bool).transpose([2, 0, 1]).ravel()
     for count in [0, 1]:
-        # This makes the mask points have large errors
+        # This makes the mask points have >5 sigma residuals
         c = (~k).astype(float) * 1e5 + 1
         sigma_w_inv = As.T.dot(As.multiply(1 / (yerr * c)[:, None] ** 2)).toarray()
         #            if jdx == 0:
@@ -243,8 +254,8 @@ def fit_model(visit, spline: bool = False, nsamps: int = 40, suffix=""):
         w = np.linalg.solve(sigma_w_inv, B)
         werr = sigma_w.diagonal() ** 0.5
         k &= np.abs(((y - y.mean()) - As.dot(w)) / yerr) < 5
-    tds = np.abs(visit.no_limb_transit_subtime.min(axis=(0, 1)))
-    eds = np.abs(visit.eclipse_subtime.min(axis=(0, 1)))
+    tds = np.abs(visit.no_limb_transits_subtime.min(axis=(0, 1)))
+    eds = np.abs(visit.eclipses_subtime.min(axis=(0, 1)))
     oot_flux = np.median(visit.average_lc[oot])
     # Package up result:
     if not hasattr(visit, "transmission_spectrum"):
@@ -345,7 +356,7 @@ def fit_model(visit, spline: bool = False, nsamps: int = 40, suffix=""):
     else:
         spline1 = lk.designmatrix.create_sparse_spline_matrix(
             visit.wavelength.value,
-            knots=np.arange(1.1, 1.7, 0.01) * 1e4,
+            knots=np.arange(0.6, 1.8, 0.01) * 1e4,
             degree=2,
         ).X
         nknots = spline1.shape[1]

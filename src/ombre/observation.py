@@ -11,6 +11,7 @@ from .spec import Spectrum, Spectra
 from astropy.io import fits
 import warnings
 import pymc3_ext as pmx
+import astropy.units as u
 
 from tqdm import tqdm
 
@@ -148,18 +149,13 @@ class Observation(
         # ).reshape((len(unique), len(fnames)))
 
         visits = []
-        for direction in [True, False]:
-            for idx, mask in tqdm(
-                enumerate(masks),
-                desc=f"{'Forward' if direction else 'Backward'}",
-                total=len(masks),
-            ):
-                if direction:
-                    mask &= postarg2 > 0
-                else:
-                    mask &= postarg2 <= 0
-                if mask.sum() == 0:
-                    continue
+        for idx, mask in tqdm(
+            enumerate(masks),
+            total=len(masks),
+            position=0,
+            leave=True,
+        ):
+            for direction in [True, False]:
                 if limit is not None:
                     if len(visits) >= limit:
                         break
@@ -170,7 +166,8 @@ class Observation(
                     force=force,
                     pixel_mask=pixel_mask,
                 )
-                visits.append(visit)
+                if visit is not None:
+                    visits.append(visit)
         if (not force) & (len(visits) == 0):
             raise ValueError("Can not extract visits, try `force`.")
         return Observation(visits, name=visits[0].name, **kwargs)
@@ -255,7 +252,7 @@ class Observation(
             for attr in attrs
         }
 
-    def plot(self, xlim=None, ylim=None, **kwargs) -> plt.Axes:
+    def plot_transit_fit(self, xlim=None, ylim=None, **kwargs) -> plt.Axes:
         """Create a plot of the `Observation`.
 
         Parameters
@@ -272,23 +269,36 @@ class Observation(
              Plot of the `Spectrum`.
         """
         with plt.style.context("seaborn-white"):
+            npanels = 1
+            if hasattr(self, "_transit_fit_inputs"):
+                if self._transit_fit_inputs["x_suppl"] is not None:
+                    npanels = 2
             fig, axs = plt.subplots(
-                1,
                 self.nplanets,
-                figsize=(self.nplanets * 5, 4),
+                npanels,
+                figsize=(12, self.nplanets * 5),
                 sharey=True,
+                sharex=True,
             )
             if self.nplanets == 1:
-                axs = [axs]
+                axs = np.atleast_2d(axs)
             norm = np.hstack(
                 [
                     np.median(visit.average_lc[visit.oot]) * np.ones(visit.nt)
                     for visit in self
                 ]
             )
-            for pdx, ax in enumerate(axs):
-
+            for pdx in range(self.nplanets):
+                ax = axs[pdx, 0]
                 ax.set(xlabel="Phase", ylabel="Normalized Flux")
+                ax.scatter(
+                    self.phase(pdx),
+                    self.average_lc / norm,
+                    s=1,
+                    c="r",
+                    label="Raw",
+                )
+
                 if hasattr(self, "noise_model"):
                     y = self.average_lc / self.noise_model
                     ax.scatter(
@@ -303,7 +313,7 @@ class Observation(
                             self.phase(pdx),
                             self.transits.sum(axis=-1) + 1,
                             s=2,
-                            label="Transit",
+                            label="Transit Model",
                         )
 
                     if self.eclipses.sum() != 0:
@@ -311,18 +321,29 @@ class Observation(
                             self.phase(pdx),
                             self.eclipses.sum(axis=-1) + 1,
                             s=2,
-                            label="Eclipse",
+                            label="Eclipse Model",
                         )
-                else:
-                    ax.scatter(
-                        self.phase(pdx),
-                        self.average_lc / norm,
-                        s=1,
-                        c="r",
-                        label="Raw",
-                    )
-                ax.set(title=f"{self.name} {self.letter[pdx]}")
+                axs[pdx, 0].set(title=f"{self.name} {self.letter[pdx]} WFC3 Data")
                 ax.legend(frameon=True)
+                if npanels == 2:
+                    phase_suppl = (
+                        (self._transit_fit_inputs["x_suppl"] - self.t0[pdx])
+                        / self.period[pdx]
+                    ) % 1
+                    phase_suppl[phase_suppl > 0.5] -= 1
+                    axs[pdx, 1].scatter(
+                        phase_suppl, self._transit_fit_inputs["y_suppl"], s=0.1, c="k"
+                    )
+                    axs[pdx, 1].scatter(
+                        phase_suppl, self.transit_suppl + 1, s=1, c="C0"
+                    )
+                    if self.eclipses.sum() != 0:
+                        axs[pdx, 1].scatter(
+                            phase_suppl, self.eclipse_suppl + 1, s=1, c="C1"
+                        )
+                    axs[pdx, 1].set(
+                        title=f"{self.name} {self.letter[pdx]} Supplementary Data"
+                    )
                 ax.set(xlim=xlim, ylim=ylim)
         return axs
 
@@ -334,7 +355,45 @@ class Observation(
 
     @property
     def _subtime(self):
-        return np.hstack([visit._subtime.ravel() for visit in self])
+        return np.hstack([visit._subtime for visit in self])
+
+    def _cast_subtime(self, name, loc=None):
+        """Take either the map_soln or the trace and reshape the subtime arrays
+
+        Parameters
+        ----------
+        name: str
+            Name of the parameter to cast
+        loc: None or int
+            If none, will cast the map_soln. If int, will cast that index of the trace.
+        """
+        for visit in self:
+            interp = []
+            for pdx in range(self.nplanets):
+                if loc == None:
+                    y = self.map_soln[name][:, pdx]
+                else:
+                    y = np.vstack(self.trace.posterior[name])[loc][:, pdx]
+                interp.append(
+                    np.interp(
+                        np.vstack(
+                            [
+                                np.linspace(
+                                    visit.time[idx]
+                                    - (visit.exptime * u.second.to(u.day)) / 2,
+                                    visit.time[idx]
+                                    + (visit.exptime * u.second.to(u.day)) / 2,
+                                    visit.nsp,
+                                )
+                                for idx in range(visit.nt)
+                            ]
+                        ),
+                        self._subtime,
+                        y,
+                    )
+                )
+            interp = np.asarray(interp).transpose([1, 2, 0])
+            setattr(visit, name, interp)
 
     def _build_pymc3_model(self, point=None, fit=True, sample=True, draws=200):
         """We do this because we don't want to sample over the large transit/eclipse/subtime arrays
@@ -343,7 +402,7 @@ class Observation(
         """
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            _pymc3_model, map_soln, trace, self._pymc3_fit = fit_multi_transit(
+            pymc3_model, map_soln, trace, self._pymc3_fit = fit_multi_transit(
                 **self._transit_fit_inputs,
                 fit=fit,
                 point=point,
@@ -351,66 +410,58 @@ class Observation(
                 draws=draws,
             )
         if fit:
-            self._pymc3_model = _pymc3_model
+            self._pymc3_model = pymc3_model
             self.map_soln = map_soln
+        if sample:
             self.trace = trace
 
-        no_limb_transit_subtime = self._pymc3_fit["no_limb_transit_subtime"]
-        transit_subtime = self._pymc3_fit["transit_subtime"]
-        self.transits = self._pymc3_fit["transits"]
-        if "eclipses" in self._pymc3_fit:
-            self.eclipses = self._pymc3_fit["eclipses"]
-        else:
-            self.eclipses = np.zeros_like(self.transits)
-        self.noise_model = self._pymc3_fit["noise_model"]
+    def draw(self, loc=None):
+        """Draw a samle from the trace"""
 
-        if hasattr(self._pymc3_model, "eclipse_subtime"):
-            eclipse_subtime = self._pymc3_fit["eclipse_subtime"]
-            eclipses = self._pymc3_fit["eclipses"]
+        if isinstance(loc, int):
+            if not hasattr(self, "trace"):
+                raise ValueError(
+                    "can not draw with out a trace run `sample_transit` first"
+                )
+            nsamps = len(self.trace.sample_stats.draw) * len(
+                self.trace.sample_stats.chain
+            )
+            if loc > nsamps:
+                raise ValueError(f"Must specify an index less than {nsamp} samples")
+
+        self._cast_subtime("no_limb_transits_subtime", loc)
+        self._cast_subtime("transits_subtime", loc)
+        if "eclipses" in self.map_soln:
+            self._cast_subtime("eclipses_subtime", loc)
+        else:
+            for visit in self:
+                visit.eclipses_subtime = np.zeros_like(visit.transits_subtime)
+
+        if isinstance(loc, int):
+            self.transits = np.vstack(self.trace.posterior["transits"])[loc]
+            if "eclipses" in self.map_soln:
+                self.eclipses = np.vstack(self.trace.posterior["eclipses"])[loc]
+            self.noise_model = np.vstack(self.trace.posterior["noise_model"])[loc]
+        else:
+            self.transits = self.map_soln["transits"]
+            self.noise_model = self.map_soln["noise_model"]
+
+            if "transit_suppl" in self._pymc3_fit:
+                self.transit_suppl = self._pymc3_fit["transit_suppl"]
+            if "eclipses" in self.map_soln:
+                self.eclipses = self.map_soln["eclipses"]
+                if "transit_suppl" in self._pymc3_fit:
+                    self.eclipse_suppl = self._pymc3_fit["eclipse_suppl"]
+            else:
+                self.eclipses = np.zeros_like(self.transits)
+                if "transit_suppl" in self._pymc3_fit:
+                    self.eclipse_suppl = np.zeros_like(self.transit_suppl)
 
         for idx in range(len(self)):
-            self[idx].no_limb_transit_subtime = no_limb_transit_subtime[
-                self._subtime_idxs == idx
-            ].reshape((self[idx].nt, self[idx].nsp, self.nplanets))
-            self[idx].transit_subtime = transit_subtime[
-                self._subtime_idxs == idx
-            ].reshape((self[idx].nt, self[idx].nsp, self.nplanets))
-            self[idx].transit = self.transits[self._time_idxs == idx]
-            if "eclipse_subtime" in self._pymc3_fit:
-                self[idx].eclipse_subtime = eclipse_subtime[
-                    self._subtime_idxs == idx
-                ].reshape((self[idx].nt, self[idx].nsp, self.nplanets))
-                self[idx].eclipse = self.eclipses[self._time_idxs == idx]
-            else:
-                self[idx].eclipse_subtime = np.zeros_like(self[idx].transit_subtime)
-                self[idx].eclipse = np.zeros_like(self[idx].transit)
+            self[idx].transits = self.transits[self._time_idxs == idx]
+            self[idx].eclipses = self.eclipses[self._time_idxs == idx]
             self[idx].noise_model = self.noise_model[self._time_idxs == idx]
-
-    def draw(self):
-        if not hasattr(self, "map_soln"):
-            raise ValueError("run `fit_transit` first")
-        if not hasattr(self, "trace"):
-            raise ValueError("can not draw with out a trace...")
-
-        def make_dict_from_trace(trace, point):
-            loc = np.random.choice(
-                np.arange(np.product(trace.posterior["r"].shape[:2]))
-            )
-            new_point = {}
-            for key in point.keys():
-                if key not in trace.posterior:
-                    new_point[key] = point[key]
-                    continue
-                new_point[key] = np.vstack(np.atleast_3d(trace.posterior[key]))[
-                    loc
-                ].reshape(point[key].shape)
-            return new_point
-
-        self._build_pymc3_model(
-            point=make_dict_from_trace(self.trace, self.map_soln),
-            fit=False,
-            sample=False,
-        )
+        return
 
     def fit_transit(
         self,
@@ -421,10 +472,6 @@ class Observation(
         fit_period=True,
         calc_eclipse=False,
         ttvs=False,
-        point=None,
-        fit=True,
-        sample=True,
-        draws=200,
     ):
 
         self._transit_fit_inputs = {
@@ -440,7 +487,12 @@ class Observation(
             "inc_val": np.atleast_1d([np.deg2rad(i) for i in self.incl]),
             "r_star": self.st_rad,
             "m_star": self.st_mass,
-            "exptime": np.median(np.diff(self.time)),
+            "exptime": np.median(
+                [(visit.exptime * u.second.to(u.day)) for visit in self]
+            ),
+            "expsubtime": np.median(
+                [(visit.exptime * u.second.to(u.day)) / visit.nsp for visit in self]
+            ),
             "A": self.A,
             "offsets": self.offsets,
             "subtime": self._subtime,
@@ -453,38 +505,80 @@ class Observation(
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            self._build_pymc3_model(point=point, fit=fit, sample=sample, draws=draws)
+            self._build_pymc3_model(fit=True, sample=False)
 
-    def copy_transit_fit(self, other):
-        """Copy the properties of one Observation transit fit to another"""
-        self._pymc3_model, self.map_soln = other._pymc3_model, other.map_soln
-        for idx in range(len(self)):
-            self[idx].no_limb_transit_subtime = other["no_limb_transit_subtime"][
-                other._subtime_idxs == idx
-            ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
-            self[idx].transit_subtime = other["transit_subtime"][
-                other._subtime_idxs == idx
-            ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
-            self[idx].transit = other["transits"][other._time_idxs == idx]
-            self[idx].eclipse_subtime = other["eclipse_subtime"][
-                other._subtime_idxs == idx
-            ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
-            self[idx].eclipse = other["eclipses"][other._time_idxs == idx]
-            self[idx].noise_model = other["noise_model"][other._time_idxs == idx]
+        self.draw()
+        if x_suppl is not None:
+            k = (
+                np.abs(
+                    (
+                        self._transit_fit_inputs["y_suppl"]
+                        - self._pymc3_fit["transit_suppl"]
+                        - self.map_soln["y_supplmean"]
+                    )
+                    / self._transit_fit_inputs["yerr_suppl"]
+                )
+                < 5
+            )
+            for attr in ["x_suppl", "y_suppl", "yerr_suppl"]:
+                self._transit_fit_inputs[attr] = self._transit_fit_inputs[attr][k]
+
+        k = (
+            np.abs(
+                (
+                    self._transit_fit_inputs["y"]
+                    - self.noise_model
+                    - self.transits.sum(axis=-1)
+                )
+                / self._transit_fit_inputs["yerr"]
+            )
+            < 10
+        )
+        self._transit_fit_inputs["yerr"][k] *= 10
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._build_pymc3_model(point=self.map_soln, fit=True, sample=False)
+        self.draw()
+        return
+
+    def sample_transit(self, draws=5):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            self._build_pymc3_model(
+                point=self.map_soln, fit=False, sample=True, draws=draws
+            )
+
+    #
+    # def copy_transit_fit(self, other):
+    #     """Copy the properties of one Observation transit fit to another"""
+    #     self._pymc3_model, self.map_soln = other._pymc3_model, other.map_soln
+    #     for idx in range(len(self)):
+    #         self[idx].no_limb_transit_subtime = other["no_limb_transit_subtime"][
+    #             other._subtime_idxs == idx
+    #         ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
+    #         self[idx].transit_subtime = other["transit_subtime"][
+    #             other._subtime_idxs == idx
+    #         ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
+    #         self[idx].transit = other["transits"][other._time_idxs == idx]
+    #         self[idx].eclipse_subtime = other["eclipse_subtime"][
+    #             other._subtime_idxs == idx
+    #         ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
+    #         self[idx].eclipse = other["eclipses"][other._time_idxs == idx]
+    #         self[idx].noise_model = other["noise_model"][other._time_idxs == idx]
 
     @property
     def oot(self):
         if hasattr(self, "transits"):
             return np.hstack(
                 [
-                    ((visit.transit == 0) & (visit.eclipse == 0)).all(axis=-1)
+                    ((visit.transits == 0) & (visit.eclipses == 0)).all(axis=-1)
                     for visit in self
                 ]
             )
         else:
             return np.hstack([np.ones(visit.nt, bool) for visit in self])
 
-    def fit_model(self, spline=False, nsamps=40):
+    def fit_model(self, spline=False, nsamps=50, ld_npoly=1):
         """
         Fits the eclipse/transit models for a given visit.
 
@@ -500,19 +594,26 @@ class Observation(
         nsamps: int
             Number of samples to draw for each spectrum
         """
-        ndraws = 5
-        for count in np.hstack(["map_soln", np.arange(ndraws) + 1]):
+
+        ndraws = (
+            len(self.trace.sample_stats.draw) * len(self.trace.sample_stats.chain)
+            if hasattr(self, "trace")
+            else 0
+        )
+        for count in np.hstack(["map_soln", np.arange(ndraws)]):
             if count == "map_soln":
                 # Make sure we're set to map_soln
-                self._build_pymc3_model(point=self.map_soln, fit=False, sample=False)
+                self.draw()
             else:
                 # Draw from trace
-                self.draw()
+                self.draw(int(count))
             [
-                fit_model(visit, spline=spline, nsamps=nsamps, suffix=count)
+                fit_model(
+                    visit, spline=spline, nsamps=nsamps, suffix=count, ld_npoly=ld_npoly
+                )
                 for visit in tqdm(
                     self,
-                    desc=f"Fitting Spectra Per Visit [Draw {count}/{ndraws}]",
+                    desc=f"Fitting Spectra Per Visit [Draw {count}/{ndraws + 1}]",
                     total=len(self),
                     position=0,
                     leave=True,
@@ -567,22 +668,25 @@ class Observation(
                 model=self._pymc3_model,
                 point=self._pymc3_model.test_point,
             )
-            if not hasattr(self, "trace"):
-                ax[idx].scatter(
-                    orig_t0s + self.t0[idx],
-                    orig_t0s - self.map_soln[f"tts_{letter}"],
-                    s=1,
-                    c="k",
-                )
-            else:
-                tts = np.vstack(np.atleast_3d(self.trace.posterior[f"tts_{letter}"]))
-                ax[idx].errorbar(
-                    orig_t0s + self.t0[idx],
-                    orig_t0s - tts.mean(axis=0),
-                    tts.std(axis=0),
-                    c="k",
-                    ls="",
-                )
+
+            ax[idx].scatter(
+                orig_t0s + self.t0[idx],
+                orig_t0s - self.map_soln[f"tts_{letter}"],
+                s=1,
+                c="k",
+            )
+            if hasattr(self, "trace"):
+                if self.trace is not None:
+                    tts = np.vstack(
+                        np.atleast_3d(self.trace.posterior[f"tts_{letter}"])
+                    )
+                    ax[idx].errorbar(
+                        orig_t0s + self.t0[idx],
+                        orig_t0s - tts.mean(axis=0),
+                        tts.std(axis=0),
+                        c="k",
+                        ls="",
+                    )
             ax[idx].set(
                 ylabel="$\delta$ Transit Mid Point [days]",
                 title=f"{self.name} {letter}",
@@ -591,9 +695,7 @@ class Observation(
                 ax[idx].set(xlabel="Original Transit Mid Point [JD]")
         return fig
 
-    def plot_spectra(self):
-        # Make sure we're set to map_soln
-        self._build_pymc3_model(point=self.map_soln, fit=False, sample=False)
+    def plot_spectra(self, type="transmission"):
         fig = plt.figure(
             figsize=((self.nplanets + 1) * 6, 3 * len(self)), facecolor="white"
         )
@@ -604,9 +706,12 @@ class Observation(
             visit.plot(ax=ax)
             for jdx, letter in enumerate(self.letter):
                 ax = plt.subplot2grid((len(self), self.nplanets + 1), (idx, jdx + 1))
-                visit.transmission_spectrum[f"{letter}_map_soln"].plot(ax=ax)
+                getattr(visit, f"{type}_spectrum")[f"{letter}_map_soln"].plot(
+                    ax=ax, c=f"C{[0 if type == 'transmission' else 1][0]}"
+                )
                 if idx != len(self) - 1:
                     ax.set(xlabel="")
                 if jdx != 0:
                     ax.set(ylabel="")
+
         return fig

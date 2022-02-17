@@ -1,6 +1,8 @@
 from astropy.io import votable
 import astropy.units as u
 from astroquery.mast import Observations as astropyObs
+from astropy.utils.data import conf
+
 from urllib.request import URLError
 from tqdm import tqdm
 import os
@@ -44,7 +46,8 @@ def get_nexsci(input, planets=None, **kwargs):
         f"ra+>+{ra - 0.0083333}+and+ra+<+{ra + 0.0083333}+and+dec+>{dec - 0.0083333}+and+dec+<{dec + 0.0083333}"
     )
     try:
-        df = votable.parse(url).get_first_table().to_table().to_pandas()
+        with conf.set_temp("remote_timeout", 20):
+            df = votable.parse(url).get_first_table().to_table().to_pandas()
         df = df.sort_values("pl_orbper")
         if planets is not None:
             df = df[
