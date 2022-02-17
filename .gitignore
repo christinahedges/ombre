@@ -2,6 +2,7 @@ ombre/data/
 *.fits
 [*]*.ipynb
 notebooks/results
+notebooks
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
