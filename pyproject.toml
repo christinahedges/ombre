@@ -16,7 +16,7 @@ aesara-theano-fallback = "^0.0.4"
 nbclient = "^0.5.3"
 
 [tool.poetry.dev-dependencies]
-mkdocs = "^1.2.1"
+mkdocs = "^1.2.3"
 mkdocs-material = "^7.1.9"
 mkdocstrings = "^0.15.2"
 pytkdocs = {version = "^0.11.1", extras = ["numpy-style"]}
