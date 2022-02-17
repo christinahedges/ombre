@@ -19,3 +19,10 @@ Bugs:
 
 * Stellar spectrum should save literature and best fit effective temperature
 * Add gradient of xshift and yshift to wavelength dependent model
+
+
+Notes
+-----
+
+
+Spatial scan mode data is not worth using, too noisy, not a good approach

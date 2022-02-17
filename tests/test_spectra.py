@@ -1,10 +1,10 @@
-import numpy as np
-
 import os
+
+import numpy as np
 import pytest
+
 import ombre as om
-from ombre import PACKAGEDIR
-from ombre import __version__
+from ombre import PACKAGEDIR, __version__
 
 
 def is_action():

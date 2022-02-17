@@ -33,6 +33,7 @@ nbclient = "^0.5.3"
 mkdocs-encryptcontent-plugin = "^1.2.2"
 nbconvert = "^6.2.0"
 ads = "^0.12.3"
+pyia = "^1.3"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]

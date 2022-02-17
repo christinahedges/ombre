@@ -114,26 +114,25 @@ test = ["pytest-astropy (>=0.8)", "pytest-xdist", "objgraph", "ipython", "covera
 
 [[package]]
 name = "astroquery"
-version = "0.4.2"
+version = "0.4.4"
 description = "Functions and classes to access online astronomical data resources"
 category = "main"
 optional = false
 python-versions = "*"
 
 [package.dependencies]
-astropy = ">=3.1.2"
+astropy = ">=4.0"
 beautifulsoup4 = ">=4.3.2"
 html5lib = ">=0.999"
 keyring = ">=4.0"
-numpy = ">=1.15.0"
+numpy = ">=1.16"
 pyvo = ">=1.1"
 requests = ">=2.4.3"
-six = "*"
 
 [package.extras]
 all = ["mocpy (>=0.5.2)", "astropy-healpix", "boto3", "regions"]
 all_lt_39 = ["mocpy (>=0.5.2)", "regions", "pyregion", "astropy-healpix", "aplpy", "boto3"]
-docs = ["sphinx-astropy"]
+docs = ["sphinx-astropy (>=1.5)", "scipy"]
 test = ["pytest-astropy", "matplotlib", "jinja2", "flask", "pytest-dependency"]
 
 [[package]]
@@ -449,7 +448,7 @@ python-versions = ">=2.7"
 
 [[package]]
 name = "exoplanet"
-version = "0.5.1"
+version = "0.5.2"
 description = "Fast and scalable MCMC for all your exoplanet needs"
 category = "main"
 optional = false
@@ -464,7 +463,7 @@ pymc3 = ">=3.9"
 [package.extras]
 docs = ["sphinx-book-theme", "myst-nb", "matplotlib", "corner", "lightkurve", "pymc3-ext (>=0.1.0)", "emcee"]
 extras = ["pymc3-ext (>=0.1.0)", "celerite2 (>=0.2.0)"]
-test = ["scipy", "pytest", "coverage", "pytest-env", "batman-package"]
+test = ["scipy", "pytest", "coverage", "pytest-env"]
 
 [[package]]
 name = "exoplanet-core"
@@ -1575,6 +1574,23 @@ optional = false
 python-versions = ">=3.5"
 
 [[package]]
+name = "pyia"
+version = "1.3"
+description = "A Python package for working with data from the Gaia mission"
+category = "dev"
+optional = false
+python-versions = ">=3.6"
+
+[package.dependencies]
+astropy = "*"
+numpy = "*"
+pandas = "*"
+
+[package.extras]
+docs = ["sphinx-astropy", "cython", "matplotlib", "scipy"]
+test = ["pytest-astropy", "scipy", "pyyaml"]
+
+[[package]]
 name = "pymc3"
 version = "3.11.2"
 description = "Probabilistic Programming in Python: Bayesian Modeling and Probabilistic Machine Learning with Theano"
@@ -2165,7 +2181,7 @@ testing = ["pytest (>=4.6)", "pytest-checkdocs (>=1.2.3)", "pytest-flake8", "pyt
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.8,<3.10"
-content-hash = "7625adf248ad2577f6b0a9da50880aa01f36b07692fa6d9f8406daf55159d896"
+content-hash = "328492707e5c4da11bf44385cb64f73f72cdcea4fbacd9679a480bcb0b113732"
 
 [metadata.files]
 ads = [
@@ -2230,8 +2246,8 @@ astropy = [
     {file = "astropy-4.2.1.tar.gz", hash = "sha256:ed483e472241153daec45f4b0c318c2c63d9f47305b78e6e63d32fc388c18427"},
 ]
 astroquery = [
-    {file = "astroquery-0.4.2-py3-none-any.whl", hash = "sha256:f6fd6e98a4b93c226ce7e1b085f96fa1c8b0e85aef99782e39407da37567e96a"},
-    {file = "astroquery-0.4.2.tar.gz", hash = "sha256:7979897e61aae7034a152961cefaaaba330af66951908845dc9b5d8168ed0f0d"},
+    {file = "astroquery-0.4.4-py3-none-any.whl", hash = "sha256:4f4d7fa81b9261541ce1867fb542da22de9d6ca81007ef586034a050009b7e6f"},
+    {file = "astroquery-0.4.4.tar.gz", hash = "sha256:96b62da2ebce1922df43cf338a6f85383bae88e182714e8e708923bc64b6ba63"},
 ]
 astunparse = [
     {file = "astunparse-1.6.3-py2.py3-none-any.whl", hash = "sha256:c2652417f2c8b5bb325c885ae329bdf3f86424075c4fd1a128674bc6fba4b8e8"},
@@ -2470,8 +2486,8 @@ entrypoints = [
     {file = "entrypoints-0.3.tar.gz", hash = "sha256:c70dd71abe5a8c85e55e12c19bd91ccfeec11a6e99044204511f9ed547d48451"},
 ]
 exoplanet = [
-    {file = "exoplanet-0.5.1-py3-none-any.whl", hash = "sha256:f36093b7a4018f3961957fb687093e871121aae22b7d0f84275f6fdabd66404e"},
-    {file = "exoplanet-0.5.1.tar.gz", hash = "sha256:d2a978bcebe290f05f1b3de222ef291435c0727d6ef2c1e0853d4150b334ae7c"},
+    {file = "exoplanet-0.5.2-py3-none-any.whl", hash = "sha256:6e982af15467689ae8ac1b44e890650c5cf2bcce9cebde5f20d0b5db496d98c6"},
+    {file = "exoplanet-0.5.2.tar.gz", hash = "sha256:f3f64dd3314e99f5eb29796813476d94c4cf709f279c6a8a8b620d6712aeb171"},
 ]
 exoplanet-core = [
     {file = "exoplanet_core-0.1.2-cp36-cp36m-macosx_10_9_x86_64.whl", hash = "sha256:9d60bbbfd020136efc102aad7cff0ce9903590558bd1968c29c1d852237ea278"},
@@ -3081,6 +3097,9 @@ pyflakes = [
 pygments = [
     {file = "Pygments-2.9.0-py3-none-any.whl", hash = "sha256:d66e804411278594d764fc69ec36ec13d9ae9147193a1740cd34d272ca383b8e"},
     {file = "Pygments-2.9.0.tar.gz", hash = "sha256:a18f47b506a429f6f4b9df81bb02beab9ca21d0a5fee38ed15aef65f0545519f"},
+]
+pyia = [
+    {file = "pyia-1.3.tar.gz", hash = "sha256:a8ad8a40d9cf0c4c204fc5a82f4b3004cd22f6cf08c8524c367c89cdc9987aee"},
 ]
 pymc3 = [
     {file = "pymc3-3.11.2-py3-none-any.whl", hash = "sha256:d1cbd8a58ab57d933aa6648093656a26b89d6d960112bdcca724f3490c96446e"},

@@ -1,27 +1,29 @@
 """Class for handling visit data"""
-import numpy as np
-import numpy.typing as npt
-from typing import TypeVar, Generic, Tuple, Union, Optional, List
-import matplotlib.pyplot as plt
-from dataclasses import dataclass
-from glob import glob
-from datetime import datetime
 import warnings
-from astropy.wcs import WCS
-
-from astropy.io import fits, votable
-from astropy.time import Time
-from astropy.stats import sigma_clipped_stats, sigma_clip
-import astropy.units as u
-from astropy.convolution import convolve, Box2DKernel
-from . import PACKAGEDIR
-from .modeling import fit_multi_transit
-from .calibrate import wavelength_calibrate
-from .matrix import fit_model
-
+from datetime import datetime
+from glob import glob
+from typing import Generic, List, Optional, Tuple, TypeVar, Union
 from urllib.request import URLError
 
+import astropy.units as u
+import matplotlib.pyplot as plt
+import numpy as np
+import numpy.typing as npt
+from astropy.convolution import Box2DKernel, convolve
+from astropy.io import fits, votable
+from astropy.stats import sigma_clip, sigma_clipped_stats
+from astropy.time import Time
+from astropy.wcs import WCS
+from dataclasses import dataclass
+from lightkurve.units import ppm
+from scipy import sparse
+
+from . import PACKAGEDIR
+from .calibrate import wavelength_calibrate
+from .matrix import vstack, vstack_independent
 from .query import get_nexsci
+from .spec import Spectra, Spectrum
+from .utils import simple_mask
 
 CALIPATH = "{}{}".format(PACKAGEDIR, "/data/calibration/")
 
@@ -78,20 +80,8 @@ class Visit(object):
     dec: Optional[float] = None
     wcs: Optional = None
 
-    #    t0: Optional[float] = None
-    #    period: Optional[float] = None
-
     def __post_init__(self):
         """Runs after init"""
-        # self.sys = from_nexsci(self.name, limb_darkening=[0, 0])
-        # if self.t0 is not None:
-        #     self.sys.secondaries[0].t0 = self.t0
-        # else:
-        #     self.t0 = self.sys.secondaries[0].t0.eval()
-        # if self.period is not None:
-        #     self.sys.secondaries[0].period = self.period
-        # else:
-        #     self.period = self.sys.secondaries[0].porb.eval()
         self.ns = self.sci.shape[1]
         if self.ns == 1024:
             self.ns = 1014
@@ -155,16 +145,6 @@ class Visit(object):
         ).mask
         self.error[bad_pixel_mask] = 1e10
         self._build_regressors()
-        # self._subtime = np.vstack(
-        #     [
-        #         np.linspace(
-        #             self.time[idx] - (self.exptime * u.second.to(u.day)) / 2,
-        #             self.time[idx] + (self.exptime * u.second.to(u.day)) / 2,
-        #             self.nsp,
-        #         )
-        #         for idx in range(self.nt)
-        #     ]
-        # )
         self._subtime = np.hstack(
             [
                 self.time - (self.exptime * u.second.to(u.day)) / 2,
@@ -373,7 +353,6 @@ class Visit(object):
             hdrs = [hdr for m, hdr in zip(mask, hdrs) if m]
             if not np.any(mask):
                 return None
-        #                raise ValueError("No files exist with that direction")
 
         sci, err, dq = [], [], []
         qmask = 1 | 2 | 4 | 8 | 16 | 32 | 256
@@ -395,12 +374,6 @@ class Visit(object):
         if not force:
             if (bright_pix < 1000).any():
                 raise ValueError("Not enough flux on target")
-        #        else:
-        # bright_pix_mask = bright_pix > 100
-        # time = time[bright_pix_mask]
-        # sci = list(np.asarray(sci)[bright_pix_mask])
-        # err = list(np.asarray(err)[bright_pix_mask])
-        # dq = list(np.asarray(dq)[bright_pix_mask])
 
         X, Y = np.mgrid[: sci[0].shape[0], : sci[0].shape[1]]
         xs, ys = np.asarray(
@@ -445,8 +418,6 @@ class Visit(object):
             dec=hdrs[0]["DEC_TARG"],
             wcs=wcs,
             scan_length=scan_length,
-            #            t0=t0,
-            #            period=period,
         )
 
     @property
@@ -461,21 +432,6 @@ class Visit(object):
         return (
             np.atleast_3d(spec_mean) * np.ones(self.shape).transpose([0, 2, 1])
         ).transpose([0, 2, 1])
-
-    #
-    # @property
-    # def total_spectrum(self):
-    #     avg = np.atleast_3d(self.average_vsr)
-    #     d1 = self.data / avg
-    #     e1 = self.error / avg
-    #     spec_mean = np.average(d1, axis=0, weights=1 / e1)
-    #     e = np.average((d1 - spec_mean) ** 2, axis=0, weights=1 / e1) ** 0.5
-    #     e /= e.shape[0] ** 0.5
-    #     spec_mean = spec_mean.sum(axis=0) * u.electron
-    #     e = (e ** 2).sum(axis=0) ** 0.5 * u.electron
-    #     spec_mean *= 1 / (u.second * u.Angstrom * self.sensitivity_raw)
-    #     e *= 1 / (u.second * u.Angstrom * self.sensitivity_raw)
-    #     return spec_mean, e
 
     @property
     def _basic_vsr(self):
@@ -671,38 +627,12 @@ class Visit(object):
             return A2
         return A
 
-    #
-    # def fit_transit(self, **kwargs):
-    #     with warnings.catch_warnings():
-    #         warnings.simplefilter("ignore")
-    #         self._pymc3_model, self.map_soln = fit_multi_transit(
-    #             x=self.time,
-    #             y=self.average_lc / np.median(self.average_lc),
-    #             yerr=self.average_lc_err / np.median(self.average_lc),
-    #             r_val=self.radius,
-    #             t0_val=self.t0,
-    #             period_val=self.period,
-    #             inc_val=np.deg2rad(self.incl),
-    #             r_star=self.st_rad,
-    #             m_star=self.st_mass,
-    #             exptime=np.median(np.diff(self.time)),
-    #             A=self.A,
-    #             offsets=self.A[:, -1][:, None],
-    #             subtime=self._subtime,
-    #             **kwargs,
-    #         )
-    #     self.no_limb_transit_subtime = self.map_soln["no_limb_transit_subtime"].reshape(
-    #         (self.nt, self.nsp, self.nplanets)
-    #     )
-    #     self.transit_subtime = self.map_soln["transit_subtime"].reshape(
-    #         (self.nt, self.nsp, self.nplanets)
-    #     )
-    #     self.eclipse_subtime = self.map_soln["eclipse_subtime"].reshape(
-    #         (self.nt, self.nsp, self.nplanets)
-    #     )
-
     def plot(
-        self, ax: Optional[plt.Axes] = None, xlim=None, ylim=None, **kwargs
+        self,
+        ax: Optional[plt.Axes] = None,
+        xlim: Optional[tuple] = None,
+        ylim: Optional[tuple] = None,
+        **kwargs,
     ) -> plt.Axes:
         """Create a plot of the `Observation`.
 
@@ -767,25 +697,6 @@ class Visit(object):
             return np.ones(self.nt, bool)
         return ((self.eclipses + self.transits) == 0).all(axis=-1)
 
-    #
-    # def fit_model(self, spline=False, nsamps=40, suffix=""):
-    #     """
-    #     Fits the eclipse/transit models for a given visit.
-    #
-    #     Parameters
-    #     ----------
-    #
-    #     spline: bool
-    #         Whether to use a spline model for the transit depth
-    #         If True, will use splines. This will make the spectrum
-    #         "smooth"
-    #     nknots: int
-    #         Number of knots for the spline
-    #     nsamps: int
-    #         Number of samples to draw for each spectrum
-    #     """
-    #     fit_model(self, spline=spline, nsamps=nsamps, suffix=suffix)
-
     def diagnose(self, frame: int = 0) -> plt.figure:
         """Make a diagnostic plot for the visit
 
@@ -798,6 +709,8 @@ class Visit(object):
         fig: matplotlib.pyplot.figure
             Figure object
         """
+        if not hasattr(self, "trace_wavelength"):
+            raise ValueError("Calibrate the visit first with `calibrate` class method.")
         with plt.style.context("seaborn-white"):
             fig = plt.gcf()
             fig.set_size_inches(11, 5.5)
@@ -819,43 +732,6 @@ class Visit(object):
                     ylabel="Spatial Pixel",
                 )
             plt.colorbar(im, ax=ax)
-            # ax = plt.subplot2grid((3, 4), (0, 2))
-            # ax.plot(
-            #     self.average_vsr[frame],
-            #     c="k",
-            #     lw=0.1,
-            # )
-            # ax.set(
-            #     title="Average Spatial Scan",
-            #     xlabel="Spatial Pixel",
-            #     ylabel="Normalized Flux",
-            # )
-            #
-            # ax = plt.subplot2grid((3, 4), (0, 3))
-            # ax.plot(
-            #     self.average_spectrum[frame].T,
-            #     c="k",
-            #     lw=0.5,
-            # )
-            # ax.set(
-            #     title="Average Spectrum",
-            #     xlabel="Spectral Pixel",
-            #     ylabel="Normalized Flux",
-            # )
-            #
-            # ax = plt.subplot2grid((3, 4), (0, 2))
-            # ax.imshow(
-            #     self.flat[0],
-            #     cmap="coolwarm",
-            #     vmin=0.99,
-            #     vmax=1.01,
-            # )
-            # ax.set(
-            #     title="Flat Field",
-            #     xlabel="Spectral Pixel",
-            #     ylabel="Spatial Pixel",
-            #     #                aspect="auto",
-            # )
 
             ax = plt.subplot2grid((2, 4), (0, 2), colspan=2)
             ax.errorbar(
@@ -868,18 +744,6 @@ class Visit(object):
                 ls="",
             )
             if hasattr(self, "transits"):
-                # ax.scatter(
-                #     self.time,
-                #     self.map_soln["full_model"],
-                #     c="r",
-                #     s=0.1,
-                #     label="Data",
-                # )
-                # ax.plot(
-                #     self.time,
-                #     self.map_soln["hook"] + 1,
-                #     c="lime",
-                # )
                 ax.scatter(
                     self.time,
                     self.noise_model,
@@ -907,31 +771,6 @@ class Visit(object):
                 ylabel="Normalized Flux",
             )
 
-            # ax = plt.subplot2grid((3, 4), (2, 0))
-            # im = ax.imshow(
-            #     self.average_spectrum[frame],
-            #     cmap="viridis",
-            # )
-            # plt.colorbar(im, ax=ax)
-            # ax.set(
-            #     title="Average Spectrum",
-            #     xlabel="Spectral Pixel",
-            #     ylabel="Spatial Pixel",
-            #     aspect="auto",
-            # )
-            # ax = plt.subplot2grid((3, 4), (2, 1))
-            # im = ax.imshow(
-            #     self.average_vsr[frame],
-            #     cmap="viridis",
-            # )
-            # plt.colorbar(im, ax=ax)
-            # ax.set(
-            #     title="Average VSR",
-            #     xlabel="Spectral Pixel",
-            #     ylabel="Spatial Pixel",
-            #     aspect="auto",
-            # )
-
             ax = plt.subplot2grid((2, 4), (1, 1))
             im = ax.pcolormesh(
                 self.average_vsr[frame]
@@ -948,20 +787,6 @@ class Visit(object):
             )
 
             ax = plt.subplot2grid((2, 4), (1, 0))
-            # im = ax.imshow(
-            #     self.residuals[frame],
-            #     cmap="coolwarm",
-            #     vmin=-vlevel,
-            #     vmax=vlevel,
-            # )
-            # plt.colorbar(im, ax=ax)
-            # ax.set(
-            #     title="Residuals",
-            #     xlabel="Spectral Pixel",
-            #     ylabel="Spatial Pixel",
-            #     #                aspect="auto",
-            # )
-
             ax.plot(
                 self.trace_wavelength,
                 self.sensitivity_t / self.sensitivity_t.mean(),
@@ -1059,100 +884,259 @@ class Visit(object):
         vsr_grad = model - vsr_mean
         return (vsr_mean + vsr_grad) * avg
 
+    def build_noise_matrix(self):
+        """Builds a sparse matrix containing all of the (wavelength dependent) transit components.
 
-def simple_mask(
-    sci: npt.NDArray[np.float64],
-    target_block: npt.NDArray[np.float64],
-    filter: str = "G141",
-) -> (npt.NDArray[bool], npt.NDArray[np.float64], npt.NDArray[np.float64]):
-    """Build a 4D boolean mask that is true where the spectrum is on the detector.
+        The matrix will be npixels x (nwavelength bins * 2 + ld_npoly). It contains
+        1) the transit model (without limb darkening) per each wavelength bin
+        2) the eclipse model per each wavelength bin
+        3) The difference between the limb darkened transit and un-limb darkened
+            transit as a polynomial of order ld_npoly
 
-    Parameters
-    ----------
-    sci : np.ndarray
-        4D data cube of each ramp, frame, column and row.
+        Parameters
+        ----------
+        ld_poly: int
+            Polynomial order for limb darkening fit. If > 1, will allow a polynomial
+            fit for delta limb darkening in wavelength
+        """
+        cdx = 0
 
-    Returns
-    -------
-    mask : np.ndarray of bools
-        4D mask, true where the spectrum is dispersed on the detector.
-    spectral : np.ndarray of floats
-        The average data in the spectral dimension
-    spatial : np.ndarray of floats
-        The average of the data in the spatial dimension.
-    """
-    mask = np.atleast_3d(sci.mean(axis=0) > np.nanpercentile(sci, 50)).transpose(
-        [2, 0, 1]
-    )
-    for count in [0, 1]:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            data = sci / mask
-            data[~np.isfinite(data)] = np.nan
-            spectral = np.nanmean(data, axis=(0, 1))
-            spatial = np.nanmean(data, axis=(0, 2))
-
-        # These are hard coded to be generous.
-        spatial_cut = 0.4
-        if filter == "G102":
-            spectral_cut = 0.4
-        if filter == "G141":
-            spectral_cut = 0.3
-
-        spectral = spectral > np.nanmax(spectral) * spectral_cut
-        # G102 edge is hard to find.
-        # if filter == "G102":
-        #     edge = (
-        #         np.where((np.gradient(spectral / np.nanmax(spectral)) < -0.07))[0][0] - 10
-        #     )
-        #     m = np.ones(len(spectral), bool)
-        #     m[edge:] = False
-        #     spectral &= m
-
-        spatial = spatial > np.nanmax(spatial) * spatial_cut
-
-        mask = (
-            np.atleast_3d(np.atleast_2d(spectral) * np.atleast_2d(spatial).T)
-        ).transpose([2, 0, 1])
-
-        # Cut out the zero phase dispersion!
-        # Choose the widest block as the true dispersion...
-        secs = mask[0].any(axis=0).astype(int)
-        sec_l = np.hstack(
-            [0, np.where(np.gradient(secs) != 0)[0][::2] + 1, mask.shape[1]]
+        xs, ys, bkg = (
+            self.xshift[:, None] * np.ones((self.nt, self.nsp)),
+            self.yshift[:, None] * np.ones((self.nt, self.nsp)),
+            self.bkg[:, None] * np.ones((self.nt, self.nsp)),
         )
-        dsec_l = np.diff(sec_l)
-        msec_l = np.asarray([s.mean() for s in np.array_split(secs, sec_l[1:-1])])
-        l = sec_l[np.argmax(dsec_l * msec_l) : np.argmax(dsec_l * msec_l) + 2]
-        m = np.zeros(mask.shape[1:], bool)
-        m[:, l[0] : l[1]] = True
-        mask[0] &= m
+        Y = self.Y[:, :, cdx]
+        X = (
+            (np.arange(self.nt)[:, None, None] * np.ones(self.T.shape) - self.nt / 2)
+            / (self.nt)
+        )[:, :, cdx]
 
-        secs = mask[0].any(axis=1).astype(int)
-        sec_l = np.hstack(
-            [0, np.where(np.gradient(secs) != 0)[0][::2] + 1, mask.shape[1]]
+        A = np.asarray(
+            [xs ** idx * ys ** jdx for idx in range(3) for jdx in range(2)][2:]
         )
-        dsec_l = np.diff(sec_l)
-        msec_l = np.asarray([s.mean() for s in np.array_split(secs, sec_l[1:-1])])
-        if (msec_l == 1).sum() == 1:
-            break
-        else:
-            mask = np.atleast_3d(
-                sci.mean(axis=0) > np.nanpercentile(sci, 50)
-            ).transpose([2, 0, 1])
-            mask[0] &= target_block
+        A = np.vstack(
+            [A, np.asarray([self.T[:, :, cdx] ** idx for idx in np.arange(1, 2)])]
+        )
+        A = np.vstack(
+            [
+                A,
+                np.asarray(
+                    [X ** idx * Y ** jdx for idx in range(3) for jdx in range(3)]
+                ),
+            ]
+        )
+        A1 = np.hstack(A.transpose([1, 0, 2])).T
 
-    spectral, spatial = (
-        np.atleast_3d(np.atleast_2d(spectral & mask[0].any(axis=0))).transpose(
-            [2, 0, 1]
-        ),
-        np.atleast_3d(np.atleast_2d((spatial & mask[0].any(axis=1)).T)).transpose(
-            [2, 1, 0]
-        ),
-    )
-    if spatial.sum() < 4:
-        while spatial.sum() < 4:
-            spatial |= (np.gradient(spatial[0, :, 0].astype(float)) != 0)[None, :, None]
-        mask = spatial & spectral
+        Anames = np.asarray(
+            [f"$x_s^{idx}y_s^{jdx}$" for idx in range(3) for jdx in range(2)][2:]
+        )
+        Anames = np.hstack(
+            [Anames, np.asarray([f"$T^{idx}$" for idx in np.arange(1, 2)])]
+        )
+        Anames = np.hstack(
+            [
+                Anames,
+                np.asarray(
+                    [f"$x^{idx}y^{jdx}$" for idx in range(4) for jdx in range(4)]
+                ),
+            ]
+        )
 
-    return (mask, spectral, spatial)
+        fixed0 = vstack([ys.ravel()], self.nwav)
+        fixed1 = vstack(
+            [ys.ravel()],
+            self.nwav,
+            n_dependence=np.linspace(-0.5, 0.5, self.nwav),
+        )
+
+        noise = vstack_independent(A1, self.nwav)
+        As = sparse.hstack(
+            [noise, fixed0, fixed1],
+            format="csr",
+        )
+        Anames_all = np.asarray(
+            [
+                "$({})_{{{}}}$".format(name[1:-1], jdx)
+                for jdx in range(self.nwav)
+                for name in Anames
+            ]
+        )
+        Anames_all = np.hstack([Anames_all, "$ys_0$", "$ys_1$"])
+        return Anames_all, As
+
+    def build_transit_matrix(self, ld_npoly: int = 1):
+        """Builds a sparse matrix containing all of the (wavelength dependent) transit components.
+
+        The matrix will be npixels x (nwavelength bins * 2 + ld_npoly). It contains
+        1) the transit model (without limb darkening) per each wavelength bin
+        2) the eclipse model per each wavelength bin
+        3) The difference between the limb darkened transit and un-limb darkened
+            transit as a polynomial of order ld_npoly
+
+        Parameters
+        ----------
+        ld_poly: int
+            Polynomial order for limb darkening fit. If > 1, will allow a polynomial
+            fit for delta limb darkening in wavelength
+
+        Returns
+        -------
+        A_names: list of str
+            The names of each component in the matrix
+        A: scipy.sparse matrix
+            The design matrix
+        """
+        no_ld_t = self.no_limb_transits_subtime
+        ld = self.transits_subtime - no_ld_t
+        eclipse = self.eclipses_subtime
+        transit1 = vstack_independent(
+            no_ld_t[np.ones(no_ld_t.shape[:2], bool), :], self.nwav
+        )
+        transit1 = sparse.hstack(
+            [transit1[:, idx :: self.nplanets] for idx in range(self.nplanets)]
+        )
+
+        eclipse1 = vstack_independent(
+            eclipse[np.ones(eclipse.shape[:2], bool), :], self.nwav
+        )
+        eclipse1 = sparse.hstack(
+            [eclipse1[:, idx :: self.nplanets] for idx in range(self.nplanets)]
+        )
+
+        A_ld = [
+            vstack(
+                ld[np.ones(ld.shape[:2], bool), :].T,
+                self.nwav,
+                n_dependence=np.linspace(-0.5, 0.5, self.nwav) ** (idx + 1),
+            )
+            for idx in range(ld_npoly)
+        ]
+        As = sparse.hstack([transit1, eclipse1, *A_ld], format="csr")
+        Anames = np.hstack(
+            [
+                [f"$\\delta f_{{tr, {letter}}}$" for letter in self.letter],
+                [f"$\\delta f_{{ec, {letter}}}$" for letter in self.letter],
+            ]
+        )
+        Anames_all = np.asarray(
+            [
+                "$({})_{{{}}}$".format(name[1:-1], jdx)
+                for name in Anames
+                for jdx in range(transit1.shape[1])
+            ]
+        )
+        Anames_all = np.hstack([Anames_all, ["$u_0$", "$u_1$"]])
+
+        return Anames, As
+
+    def fit_model(self, suffix: str = "", ld_npoly: int = 1):
+        """
+        Fits the eclipse/transit models for a given visit.
+
+        Parameters
+        ----------
+        suffix: str
+            Optional string to label the extracted transmission spectrum
+        ld_poly: int
+            Polynomial order for limb darkening fit. If > 1, will allow a polynomial
+            fit for delta limb darkening in wavelength
+        """
+
+        if not hasattr(self, "As_noise"):
+            self.Anames_noise, self.As_noise = self.build_noise_matrix()
+        Anames_transit, As_transit = self.build_transit_matrix(ld_npoly=ld_npoly)
+        Anames, As = (np.hstack([Anames_transit, self.Anames_noise])), sparse.hstack(
+            [As_transit, self.As_noise]
+        )
+
+        avg = self.average_lc / self.average_lc.mean()
+        y = ((self.data / self.model) / avg[:, None, None]).transpose([2, 0, 1]).ravel()
+        yerr = (
+            ((self.error / self.model) / avg[:, None, None])
+            .transpose([2, 0, 1])
+            .ravel()
+        )
+
+        prior_sigma = np.ones(As.shape[1]) * 1000000
+        prior_inv = np.diag(1 / prior_sigma ** 2)
+
+        oot = (
+            self.transits_subtime.sum(axis=-1).sum(axis=1)
+            + self.eclipses_subtime.sum(axis=-1).sum(axis=1)
+        ) == 0
+        k = np.ones(self.shape, bool).transpose([2, 0, 1]).ravel()
+        for count in [0, 1]:
+            # This makes the mask points have >5 sigma residuals
+            c = (~k).astype(float) * 1e5 + 1
+            sigma_w_inv = As.T.dot(As.multiply(1 / (yerr * c)[:, None] ** 2)).toarray()
+            sigma_w_inv += prior_inv
+            B = As.T.dot((y - y.mean()) / (yerr * c) ** 2)
+            sigma_w = np.linalg.inv(sigma_w_inv)
+            w = np.linalg.solve(sigma_w_inv, B)
+            werr = sigma_w.diagonal() ** 0.5
+            k &= np.abs(((y - y.mean()) - As.dot(w)) / yerr) < 5
+        tds = np.abs(self.no_limb_transits_subtime.min(axis=(0, 1)))
+        eds = np.abs(self.eclipses_subtime.min(axis=(0, 1)))
+        oot_flux = np.median(self.average_lc[oot])
+
+        # Package up result:
+        if not hasattr(self, "transmission_spectrum"):
+            self.transmission_spectrum, self.emission_spectrum = {}, {}
+
+        for pdx in range(self.nplanets):
+            td, ed, letter, meta = (
+                tds[pdx],
+                eds[pdx],
+                self.letter[pdx],
+                self.meta(pdx),
+            )
+
+            self.transmission_spectrum[
+                f"{letter}_{suffix}" if suffix != "" else f"{letter}"
+            ] = Spectrum(
+                wavelength=self.wavelength.to(u.micron),
+                spec=1e6
+                * td
+                * w[pdx * self.nwav : (pdx + 1) * self.nwav]
+                / oot_flux
+                * ppm,
+                spec_err=1e6
+                * td
+                * werr[pdx * self.nwav : (pdx + 1) * self.nwav]
+                / oot_flux
+                * ppm,
+                depth=td,
+                name=self.name + f"{letter} Transmission Spectrum",
+                visit=self.visit_number,
+                meta=meta,
+            )
+            pdx += self.nplanets
+            self.emission_spectrum[
+                f"{letter}_{suffix}" if suffix != "" else f"{letter}"
+            ] = Spectrum(
+                wavelength=self.wavelength.to(u.micron),
+                spec=1e6
+                * ed
+                * w[pdx * self.nwav : (pdx + 1) * self.nwav]
+                / oot_flux
+                * ppm,
+                spec_err=1e6
+                * ed
+                * werr[pdx * self.nwav : (pdx + 1) * self.nwav]
+                / oot_flux
+                * ppm,
+                depth=ed,
+                name=self.name + f"{letter} Emission Spectrum",
+                visit=self.visit_number,
+                meta=meta,
+            )
+
+        self.full_model = (
+            (
+                (As.dot(w)).reshape((self.nwav, self.nt, self.nsp)).transpose([1, 2, 0])
+                + y.mean()
+            )
+            * avg[:, None, None]
+            * self.model
+        )

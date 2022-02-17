@@ -1,10 +1,13 @@
 ombre/data/
 *.fits
+[*]*.ipynb
+notebooks/results
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
 */__pycache__/
 *.py[cod]
+.ipynb_checkpoints
 
 # Distribution / packaging
 .Python
@@ -23,6 +26,7 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
+
 
 tutorials/.ipynb_checkpoints
 

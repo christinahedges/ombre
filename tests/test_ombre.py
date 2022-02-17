@@ -1,11 +1,11 @@
-import numpy as np
-
 import os
-import pytest
 from glob import glob
+
+import numpy as np
+import pytest
+
 import ombre as om
-from ombre import PACKAGEDIR
-from ombre import __version__
+from ombre import PACKAGEDIR, __version__
 
 
 def is_action():
@@ -16,7 +16,7 @@ def is_action():
 
 
 def test_version():
-    assert __version__ == "0.1.0"
+    assert __version__ == "0.2.0"
 
 
 def test_visit():
@@ -33,7 +33,9 @@ def test_visit():
     # v
     fnames = glob("/".join(PACKAGEDIR.split("/")[:-2]) + "/tests/data/hd209458b/*")
     v = om.Visit.from_files(fnames)
-    v.fit_transit()
+    # Would normally run get_nexsci but don't want to ping in the tests
+    v.st_teff = 6000
+    v.calibrate()
     v.diagnose(frame=0).savefig("test_hd209458b.pdf")
     # fnames = glob("/".join(PACKAGEDIR.split("/")[:-2]) + "/tests/data/xo1b/*")
     # v = om.Visit.from_files(fnames)

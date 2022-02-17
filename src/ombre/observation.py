@@ -1,19 +1,20 @@
 """Deal with multiple visits"""
-from dataclasses import dataclass
-from typing import List, Optional
-import numpy as np
-import matplotlib.pyplot as plt
-from .visit import Visit
-from .query import get_nexsci, download_target
-from .matrix import vstack_list, fit_model
-from .modeling import fit_multi_transit
-from .spec import Spectrum, Spectra
-from astropy.io import fits
 import warnings
-import pymc3_ext as pmx
-import astropy.units as u
+from typing import List, Optional
 
+import astropy.units as u
+import matplotlib.pyplot as plt
+import numpy as np
+import pymc3_ext as pmx
+from astropy.io import fits
+from dataclasses import dataclass
 from tqdm import tqdm
+
+from .matrix import vstack_list
+from .query import download_target, get_nexsci
+from .spec import Spectra, Spectrum
+from .transit import fit_multi_transit
+from .visit import Visit
 
 
 @dataclass
@@ -265,8 +266,8 @@ class Observation(
 
         Returns
         -------
-        ax :  matplotlib.pyplot.axes object, optional
-             Plot of the `Spectrum`.
+        fig :  matplotlib.pyplot.figure object
+            Plot of the transit
         """
         with plt.style.context("seaborn-white"):
             npanels = 1
@@ -345,7 +346,7 @@ class Observation(
                         title=f"{self.name} {self.letter[pdx]} Supplementary Data"
                     )
                 ax.set(xlim=xlim, ylim=ylim)
-        return axs
+        return fig
 
     @property
     def _subtime_idxs(self):
@@ -548,24 +549,6 @@ class Observation(
                 point=self.map_soln, fit=False, sample=True, draws=draws
             )
 
-    #
-    # def copy_transit_fit(self, other):
-    #     """Copy the properties of one Observation transit fit to another"""
-    #     self._pymc3_model, self.map_soln = other._pymc3_model, other.map_soln
-    #     for idx in range(len(self)):
-    #         self[idx].no_limb_transit_subtime = other["no_limb_transit_subtime"][
-    #             other._subtime_idxs == idx
-    #         ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
-    #         self[idx].transit_subtime = other["transit_subtime"][
-    #             other._subtime_idxs == idx
-    #         ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
-    #         self[idx].transit = other["transits"][other._time_idxs == idx]
-    #         self[idx].eclipse_subtime = other["eclipse_subtime"][
-    #             other._subtime_idxs == idx
-    #         ].reshape((other[idx].nt, other[idx].nsp, other.nplanets))
-    #         self[idx].eclipse = other["eclipses"][other._time_idxs == idx]
-    #         self[idx].noise_model = other["noise_model"][other._time_idxs == idx]
-
     @property
     def oot(self):
         if hasattr(self, "transits"):
@@ -608,9 +591,7 @@ class Observation(
                 # Draw from trace
                 self.draw(int(count))
             [
-                fit_model(
-                    visit, spline=spline, nsamps=nsamps, suffix=count, ld_npoly=ld_npoly
-                )
+                visit.fit_model(suffix=count, ld_npoly=ld_npoly)
                 for visit in tqdm(
                     self,
                     desc=f"Fitting Spectra Per Visit [Draw {count}/{ndraws + 1}]",

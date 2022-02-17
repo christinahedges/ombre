@@ -1,18 +1,18 @@
-from astropy.io import votable
-import astropy.units as u
-from astroquery.mast import Observations as astropyObs
-from astropy.utils.data import conf
-
-from urllib.request import URLError
-from tqdm import tqdm
-import os
-import numpy as np
+"""Tools for getting literature values from NExSci"""
 import logging
-from astropy.constants import G, k_B, m_p
-from astropy.utils.data import download_file
-import pandas as pd
-from functools import wraps
+import os
 import sys
+from functools import wraps
+from urllib.request import URLError
+
+import astropy.units as u
+import numpy as np
+import pandas as pd
+from astropy.constants import G, k_B, m_p
+from astropy.io import votable
+from astropy.utils.data import conf, download_file
+from astroquery.mast import Observations as astropyObs
+from tqdm import tqdm
 
 log = logging.getLogger("ombre")
 
@@ -42,7 +42,7 @@ def get_nexsci(input, planets=None, **kwargs):
         ra, dec = np.copy(input.ra), np.copy(input.dec)
     url = (
         "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-        "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_bmassj,pl_orbincl,st_rad,st_mass,st_teff,sy_dist,pl_letter+from+pscomppars+where+"
+        "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_bmassj,pl_orbincl,st_rad,st_raderr1,st_raderr2,st_mass,st_masserr1,st_masserr2,st_teff,sy_dist,pl_letter+from+pscomppars+where+"
         f"ra+>+{ra - 0.0083333}+and+ra+<+{ra + 0.0083333}+and+dec+>{dec - 0.0083333}+and+dec+<{dec + 0.0083333}"
     )
     try:
@@ -57,14 +57,16 @@ def get_nexsci(input, planets=None, **kwargs):
         (ra, dec, period, t0, duration, radius, mass, incl,) = (
             np.asarray(df).T[:8].astype(float)
         )
-        (st_rad, st_mass, st_teff, dist) = np.asarray(df).T[8:-1, 0].astype(float)
+        (st_rad, rer1, rer2, st_mass, mer1, mer2, st_teff, dist) = (
+            np.asarray(df).T[8:-1, 0].astype(float)
+        )
         pl_letter = np.asarray(df.pl_letter)
     except URLError:
         raise URLError(
             "Can not access the internet to query NExSci for exoplanet parameters."
         )
     except IndexError:
-        return 0, 0, 0, 0, 0, 90, "b", 0, 0, 6000, 0
+        return 0, 0, 0, 0, 0, 90, "b", (0, 0), (0, 0), 6000, 0
 
     radius *= u.earthRad.to(u.solRad)
     mass *= u.jupiterMass.to(u.solMass)
@@ -76,8 +78,8 @@ def get_nexsci(input, planets=None, **kwargs):
         mass,
         incl,
         pl_letter,
-        st_rad,
-        st_mass,
+        (st_rad, np.max(np.abs([rer1, rer2]))),
+        (st_mass, np.max(np.abs([mer1, mer2]))),
         st_teff,
         dist,
     )

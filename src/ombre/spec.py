@@ -1,13 +1,13 @@
 """Classes for handling spectra"""
+from typing import Generic, Optional, Tuple, TypeVar, Union
+
+import astropy.units as u
+import matplotlib.pyplot as plt
 import numpy as np
 import numpy.typing as npt
-from typing import Optional, Union
-from typing import TypeVar, Generic, Tuple, Union, Optional
-import matplotlib.pyplot as plt
 from astropy.io import fits
 from astropy.table import Table
 from astropy.time import Time
-import astropy.units as u
 from lightkurve.units import ppm
 
 Shape = TypeVar("Shape")
