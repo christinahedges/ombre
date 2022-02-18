@@ -373,6 +373,7 @@ class Visit(object):
         bright_pix = np.asarray([(sci1 > 100).sum() for sci1 in sci])
         if not force:
             if (bright_pix < 1000).any():
+                return None
                 raise ValueError("Not enough flux on target")
 
         X, Y = np.mgrid[: sci[0].shape[0], : sci[0].shape[1]]
@@ -399,6 +400,9 @@ class Visit(object):
             if (
                 np.nanmean(sci, axis=(0, 2)) > np.nanmean(sci, axis=(0, 2)).max() * 0.9
             ).sum() < 4:
+                plt.figure()
+                plt.imshow(sci[0])
+                return None
                 raise ValueError("Stare mode")
 
         s = np.argsort(time)

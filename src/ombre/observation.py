@@ -316,6 +316,7 @@ class Observation(
                             self.transits.sum(axis=-1) + 1,
                             s=2,
                             label="Transit Model",
+                            c="C0",
                         )
 
                     if self.eclipses.sum() != 0:
@@ -324,6 +325,7 @@ class Observation(
                             self.eclipses.sum(axis=-1) + 1,
                             s=2,
                             label="Eclipse Model",
+                            c="C1",
                         )
                 axs[pdx, 0].set(title=f"{self.name} {self.letter[pdx]} WFC3 Data")
                 ax.legend(frameon=True)
@@ -524,23 +526,23 @@ class Observation(
             )
             for attr in ["x_suppl", "y_suppl", "yerr_suppl"]:
                 self._transit_fit_inputs[attr] = self._transit_fit_inputs[attr][k]
-
-        k = (
-            np.abs(
-                (
-                    self._transit_fit_inputs["y"]
-                    - self.noise_model
-                    - self.transits.sum(axis=-1)
-                )
-                / self._transit_fit_inputs["yerr"]
-            )
-            < 10
-        )
-        self._transit_fit_inputs["yerr"][k] *= 10
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            self._build_pymc3_model(point=self.map_soln, fit=True, sample=False)
-        self.draw()
+            #
+            # k = (
+            #     np.abs(
+            #         (
+            #             self._transit_fit_inputs["y"]
+            #             - self.noise_model
+            #             - self.transits.sum(axis=-1)
+            #         )
+            #         / self._transit_fit_inputs["yerr"]
+            #     )
+            #     < 10
+            # )
+            # self._transit_fit_inputs["yerr"][k] *= 10
+            # with warnings.catch_warnings():
+            #     warnings.simplefilter("ignore")
+            #     self._build_pymc3_model(point=self.map_soln, fit=True, sample=False)
+            self.draw()
         return
 
     def sample_transit(self, draws=5):
