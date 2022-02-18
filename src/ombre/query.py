@@ -42,23 +42,25 @@ def get_nexsci(input, planets=None, **kwargs):
         ra, dec = np.copy(input.ra), np.copy(input.dec)
     url = (
         "https://exoplanetarchive.ipac.caltech.edu/TAP/sync?query="
-        "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_bmassj,pl_orbincl,st_rad,st_raderr1,st_raderr2,st_mass,st_masserr1,st_masserr2,st_teff,sy_dist,pl_letter+from+pscomppars+where+"
+        "select+ra,dec,pl_orbper,pl_tranmid,pl_trandur,pl_rade,pl_bmassj,pl_orbincl,st_rad,st_raderr1,st_raderr2,st_mass,st_masserr1,st_masserr2,st_teff,sy_dist,pl_letter,hostname+from+pscomppars+where+"
         f"ra+>+{ra - 0.0083333}+and+ra+<+{ra + 0.0083333}+and+dec+>{dec - 0.0083333}+and+dec+<{dec + 0.0083333}"
     )
     try:
         with conf.set_temp("remote_timeout", 20):
             df = votable.parse(url).get_first_table().to_table().to_pandas()
         df = df.sort_values("pl_orbper")
+        df = df.dropna(subset=["pl_orbper", "pl_tranmid"]).reset_index(drop=True)
         if planets is not None:
             df = df[
                 np.any([np.in1d(df.pl_letter, letter) for letter in planets], axis=0)
             ]
+
         # df = df[df.pl_letter == letter].reset_index(drop=True)
         (ra, dec, period, t0, duration, radius, mass, incl,) = (
             np.asarray(df).T[:8].astype(float)
         )
         (st_rad, rer1, rer2, st_mass, mer1, mer2, st_teff, dist) = (
-            np.asarray(df).T[8:-1, 0].astype(float)
+            np.asarray(df).T[8:-2, 0].astype(float)
         )
         pl_letter = np.asarray(df.pl_letter)
     except URLError:
@@ -70,6 +72,8 @@ def get_nexsci(input, planets=None, **kwargs):
 
     radius *= u.earthRad.to(u.solRad)
     mass *= u.jupiterMass.to(u.solMass)
+    rer = np.nanmax(np.abs([rer1, rer2]))
+    mer = np.nanmax(np.abs([mer1, mer2]))
     return (
         period,
         t0,
@@ -78,8 +82,8 @@ def get_nexsci(input, planets=None, **kwargs):
         mass,
         incl,
         pl_letter,
-        (st_rad, np.max(np.abs([rer1, rer2]))),
-        (st_mass, np.max(np.abs([mer1, mer2]))),
+        (st_rad, rer if np.isfinite(rer) else st_rad * 0.2),
+        (st_mass, mer if np.isfinite(mer) else st_mass * 0.2),
         st_teff,
         dist,
     )

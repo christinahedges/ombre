@@ -77,7 +77,7 @@ class Observation(
         self.incl = np.nan_to_num(self.incl.astype(float), nan=90)
         if self.planets is None:
             self.planets = self.letter
-        self.nplanets = len(self.period)
+        self.nplanets = len(self.planets)
         for idx in range(len(self)):
             (
                 self[idx].period,
@@ -244,14 +244,15 @@ class Observation(
                 [attrs, ["period", "t0", "duration", "radius", "mass", "incl"]]
             )
 
-        return {
+        dict = {
             attr: [
                 getattr(self, attr)[pdx]
-                if hasattr(getattr(self, attr), "__iter__")
-                else float(getattr(self, attr))
+                if isinstance(getattr(self, attr), np.ndarray)
+                else np.atleast_1d(getattr(self, attr))[0]
             ][0]
             for attr in attrs
         }
+        return dict
 
     def plot_transit_fit(self, xlim=None, ylim=None, **kwargs) -> plt.Axes:
         """Create a plot of the `Observation`.

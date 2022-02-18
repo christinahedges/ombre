@@ -40,7 +40,7 @@ def animate(data, scale="linear", output="out.mp4", **kwargs):
     output : str
         File to output mp4 to
     """
-    fig, ax = plt.subplots(figsize=(6, 6))
+    fig, ax = plt.subplots(figsize=(4, 4))
     idx = 0
     if scale is "log":
         dat = np.log10(np.copy(data))
