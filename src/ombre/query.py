@@ -82,8 +82,8 @@ def get_nexsci(input, planets=None, **kwargs):
         mass,
         incl,
         pl_letter,
-        (st_rad, rer if np.isfinite(rer) else st_rad * 0.2),
-        (st_mass, mer if np.isfinite(mer) else st_mass * 0.2),
+        (st_rad, rer if rer != 0 else st_rad * 0.2),
+        (st_mass, mer if mer != 0 else st_mass * 0.2),
         st_teff,
         dist,
     )

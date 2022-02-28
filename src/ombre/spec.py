@@ -230,6 +230,21 @@ class Spectrum(object):
         hdulist.append(self.hdu)
         return fits.HDUList(hdulist)
 
+    @property
+    def MAD(self):
+        samples = np.random.normal(
+            self.spec.value, self.spec_err.value, size=(500, self.spec.shape[0])
+        )
+        mad = np.median(np.abs(samples), axis=1)
+        return np.median(mad), np.std(mad)
+
+    @property
+    def Chi2(self):
+        return (
+            np.nansum((self.spec.value) ** 2 / self.spec_err.value ** 2, axis=0)
+            / np.isfinite(self.spec).sum()
+        )
+
 
 class Spectra(object):
     def __init__(self, spec: list = [], name: Optional[str] = None):
@@ -346,22 +361,24 @@ class Spectra(object):
         return fits.HDUList(hdulist)
 
     @staticmethod
-    def from_file(fname):
-        with fits.open(fname) as hdu:
-            specs = []
-            for ext in np.arange(1, len(hdu)):
-                keys = np.asarray(list(hdu[ext].header.keys()))
-                keys = keys[np.where(keys == "DEPTH")[0][0] + 1 :]
-                meta = {key.lower(): hdu[ext].header[key] for key in keys}
-                specs.append(
-                    Spectrum(
-                        hdu[ext].data["wavelength"] * u.Unit(hdu[ext].header["TUNIT1"]),
-                        hdu[ext].data["spectrum"],
-                        hdu[ext].data["spectrum_err"],
-                        visit=hdu[ext].header["VISIT"],
-                        name=hdu[ext].header["NAME"],
-                        depth=hdu[ext].header["DEPTH"],
-                        meta=meta,
+    def from_file(fnames):
+        specs = []
+        for fname in fnames:
+            with fits.open(fname) as hdu:
+                for ext in np.arange(1, len(hdu)):
+                    keys = np.asarray(list(hdu[ext].header.keys()))
+                    keys = keys[np.where(keys == "DEPTH")[0][0] + 1 :]
+                    meta = {key.lower(): hdu[ext].header[key] for key in keys}
+                    specs.append(
+                        Spectrum(
+                            hdu[ext].data["wavelength"]
+                            * u.Unit(hdu[ext].header["TUNIT1"]),
+                            hdu[ext].data["spectrum"],
+                            hdu[ext].data["spectrum_err"],
+                            visit=hdu[ext].header["VISIT"],
+                            name=hdu[ext].header["NAME"],
+                            depth=hdu[ext].header["DEPTH"],
+                            meta=meta,
+                        )
                     )
-                )
         return Spectra(specs, specs[0].name)

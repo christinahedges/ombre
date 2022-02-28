@@ -5,6 +5,7 @@ from glob import glob
 from typing import Generic, List, Optional, Tuple, TypeVar, Union
 from urllib.request import URLError
 
+from astropy.table import Table
 import astropy.units as u
 import matplotlib.pyplot as plt
 import numpy as np
@@ -300,6 +301,7 @@ class Visit(object):
                 )
             )
         if len(filenames) <= 12:
+            return None
             raise ValueError("Not enough frames in visit.")
         with fits.open(
             filenames[0], cache=False, memmap=False, lazy_load_hdus=True
@@ -388,6 +390,7 @@ class Visit(object):
         arclength -= np.median(arclength)
         if (np.abs(arclength) > 5).any():
             if not force:
+                return None
                 raise ValueError("Lost fine point")
             else:
                 arclength_mask = ~sigma_clip(arclength).mask
@@ -400,8 +403,6 @@ class Visit(object):
             if (
                 np.nanmean(sci, axis=(0, 2)) > np.nanmean(sci, axis=(0, 2)).max() * 0.9
             ).sum() < 4:
-                plt.figure()
-                plt.imshow(sci[0])
                 return None
                 raise ValueError("Stare mode")
 
@@ -498,8 +499,8 @@ class Visit(object):
         meta = {
             attr: [
                 getattr(self, attr)[pdx]
-                if hasattr(getattr(self, attr), "__iter__")
-                else float(getattr(self, attr))
+                if isinstance(getattr(self, attr), np.ndarray)
+                else np.atleast_1d(getattr(self, attr))[0]
             ][0]
             for attr in [
                 "ra",
@@ -911,65 +912,40 @@ class Visit(object):
             self.bkg[:, None] * np.ones((self.nt, self.nsp)),
         )
         Y = self.Y[:, :, cdx]
-        X = (
-            (np.arange(self.nt)[:, None, None] * np.ones(self.T.shape) - self.nt / 2)
-            / (self.nt)
-        )[:, :, cdx]
+        # X = (
+        #     (np.arange(self.nt)[:, None, None] * np.ones(self.shape) - self.nt / 2)
+        #     / (self.nt)
+        # )[:, :, cdx]
+        T = self.T[:, :, cdx]
 
-        A = np.asarray(
-            [xs ** idx * ys ** jdx for idx in range(3) for jdx in range(2)][2:]
-        )
-        A = np.vstack(
-            [A, np.asarray([self.T[:, :, cdx] ** idx for idx in np.arange(1, 2)])]
-        )
         A = np.vstack(
             [
-                A,
                 np.asarray(
-                    [X ** idx * Y ** jdx for idx in range(3) for jdx in range(3)]
+                    [T ** idx * Y ** jdx for idx in range(2) for jdx in range(2)]
                 ),
+                np.asarray(
+                    [xs ** idx * ys ** jdx for idx in range(2) for jdx in range(2)][1:]
+                ),
+                np.asarray([xs * T ** idx for idx in np.arange(1, 2)]),
             ]
         )
         A1 = np.hstack(A.transpose([1, 0, 2])).T
+        noise = vstack_independent(A1, self.nwav)
+        # This reshapes so that we have neighboring channels next to each other in the design matrix
+        As = sparse.hstack([noise[:, idx :: A1.shape[1]] for idx in range(A1.shape[1])])
 
         Anames = np.asarray(
-            [f"$x_s^{idx}y_s^{jdx}$" for idx in range(3) for jdx in range(2)][2:]
-        )
-        Anames = np.hstack(
-            [Anames, np.asarray([f"$T^{idx}$" for idx in np.arange(1, 2)])]
-        )
-        Anames = np.hstack(
             [
-                Anames,
-                np.asarray(
-                    [f"$x^{idx}y^{jdx}$" for idx in range(4) for jdx in range(4)]
-                ),
+                *[f"$t^{idx}y^{jdx}$" for idx in range(2) for jdx in range(2)],
+                #                *[f"$T^{idx}$" for idx in np.arange(1, 2)],
+                *[f"$x_s^{idx}y_s^{jdx}$" for idx in range(2) for jdx in range(2)][1:],
+                *[f"$x_s*t^{1}$"],
             ]
         )
 
-        fixed0 = vstack([ys.ravel()], self.nwav)
-        fixed1 = vstack(
-            [ys.ravel()],
-            self.nwav,
-            n_dependence=np.linspace(-0.5, 0.5, self.nwav),
-        )
+        return Anames, As
 
-        noise = vstack_independent(A1, self.nwav)
-        As = sparse.hstack(
-            [noise, fixed0, fixed1],
-            format="csr",
-        )
-        Anames_all = np.asarray(
-            [
-                "$({})_{{{}}}$".format(name[1:-1], jdx)
-                for jdx in range(self.nwav)
-                for name in Anames
-            ]
-        )
-        Anames_all = np.hstack([Anames_all, "$ys_0$", "$ys_1$"])
-        return Anames_all, As
-
-    def build_transit_matrix(self, ld_npoly: int = 1):
+    def build_transit_matrix(self, ld_npoly: int = 1, build_eclipse=True):
         """Builds a sparse matrix containing all of the (wavelength dependent) transit components.
 
         The matrix will be npixels x (nwavelength bins * 2 + ld_npoly). It contains
@@ -993,19 +969,11 @@ class Visit(object):
         """
         no_ld_t = self.no_limb_transits_subtime
         ld = self.transits_subtime - no_ld_t
-        eclipse = self.eclipses_subtime
         transit1 = vstack_independent(
             no_ld_t[np.ones(no_ld_t.shape[:2], bool), :], self.nwav
         )
         transit1 = sparse.hstack(
             [transit1[:, idx :: self.nplanets] for idx in range(self.nplanets)]
-        )
-
-        eclipse1 = vstack_independent(
-            eclipse[np.ones(eclipse.shape[:2], bool), :], self.nwav
-        )
-        eclipse1 = sparse.hstack(
-            [eclipse1[:, idx :: self.nplanets] for idx in range(self.nplanets)]
         )
 
         A_ld = [
@@ -1016,25 +984,32 @@ class Visit(object):
             )
             for idx in range(ld_npoly)
         ]
-        As = sparse.hstack([transit1, eclipse1, *A_ld], format="csr")
-        Anames = np.hstack(
-            [
-                [f"$\\delta f_{{tr, {letter}}}$" for letter in self.letter],
-                [f"$\\delta f_{{ec, {letter}}}$" for letter in self.letter],
-            ]
-        )
-        Anames_all = np.asarray(
-            [
-                "$({})_{{{}}}$".format(name[1:-1], jdx)
-                for name in Anames
-                for jdx in range(transit1.shape[1])
-            ]
-        )
-        Anames_all = np.hstack([Anames_all, ["$u_0$", "$u_1$"]])
+        if build_eclipse:
+            eclipse = self.eclipses_subtime
+            eclipse1 = vstack_independent(
+                eclipse[np.ones(eclipse.shape[:2], bool), :], self.nwav
+            )
+            eclipse1 = sparse.hstack(
+                [eclipse1[:, idx :: self.nplanets] for idx in range(self.nplanets)]
+            )
+            As = sparse.hstack([transit1, eclipse1, *A_ld], format="csr")
+            Anames = np.hstack(
+                [
+                    [f"$\\delta f_{{tr, {letter}}}$" for letter in self.letter],
+                    [f"$\\delta f_{{ec, {letter}}}$" for letter in self.letter],
+                ]
+            )
+        else:
+            As = sparse.hstack([transit1, *A_ld], format="csr")
+            Anames = np.hstack(
+                [
+                    [f"$\\delta f_{{tr, {letter}}}$" for letter in self.letter],
+                ]
+            )
 
         return Anames, As
 
-    def fit_model(self, suffix: str = "", ld_npoly: int = 1):
+    def fit_model(self, suffix: str = "", ld_npoly: int = 1, build_eclipse=True):
         """
         Fits the eclipse/transit models for a given visit.
 
@@ -1049,7 +1024,9 @@ class Visit(object):
 
         if not hasattr(self, "As_noise"):
             self.Anames_noise, self.As_noise = self.build_noise_matrix()
-        Anames_transit, As_transit = self.build_transit_matrix(ld_npoly=ld_npoly)
+        Anames_transit, As_transit = self.build_transit_matrix(
+            ld_npoly=ld_npoly, build_eclipse=build_eclipse
+        )
         Anames, As = (np.hstack([Anames_transit, self.Anames_noise])), sparse.hstack(
             [As_transit, self.As_noise]
         )
@@ -1144,3 +1121,41 @@ class Visit(object):
             * avg[:, None, None]
             * self.model
         )
+        return w, sigma_w
+
+    def to_fits(self):
+        ivar = 1 / self.error ** 2
+        var = 1 / ivar.sum(axis=1)
+        err = np.sqrt(var)
+        avg = var * (ivar * self.data).sum(axis=1)
+
+        def table(x):
+            hdu = fits.table_to_hdu(
+                Table(
+                    [
+                        self.time,
+                        avg[:, x] * u.count,
+                        err[:, x] * u.count,
+                    ],
+                    names=["time", "flux", "flux_err"],
+                )
+            )
+            hdu.name = f"{np.round(self.wavelength[x].value/1e4, 4)}"
+            hdu.header["WVLENGTH"] = self.wavelength[x].value / 1e4
+            return hdu
+
+        hdu0 = fits.PrimaryHDU()
+        hdr = hdu0.header
+        hdr["Visit"] = self.visit_number
+        hdr["Name"] = self.name
+        for key, item in self.meta(0).items():
+            if ~np.isfinite(item):
+                continue
+            hdr[key] = item
+        for idx, letter in enumerate(self.letter):
+            hdr[f"{letter}_period"] = self.period[idx]
+            hdr[f"{letter}_t0"] = self.t0[idx]
+            hdr[f"{letter}_dur"] = self.duration[idx] / 24
+        hdulist = [hdu0, *[table(idx) for idx in range(self.nwav)]]
+        hdulist = fits.HDUList(hdulist)
+        return hdulist

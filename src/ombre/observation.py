@@ -539,9 +539,9 @@ class Observation(
             #     < 10
             # )
             # self._transit_fit_inputs["yerr"][k] *= 10
-            # with warnings.catch_warnings():
-            #     warnings.simplefilter("ignore")
-            #     self._build_pymc3_model(point=self.map_soln, fit=True, sample=False)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                self._build_pymc3_model(point=self.map_soln, fit=True, sample=False)
             self.draw()
         return
 
